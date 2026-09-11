@@ -1,0 +1,167 @@
+// terafilter.nv — the filters, as a registry the caller extends.
+//
+// Every body here is a `todo()`; the signatures are the design.
+
+use teraval
+use teraerror
+
+// A FILTER REGISTRY IS HOW A TEMPLATE LANGUAGE STAYS SMALL.  The
+// alternative is that every transformation anybody wants becomes a tag
+// in the language, and the language grows until it is a programming
+// language with the worst possible syntax.  `{{ x | upper | truncate(40) }}`
+// is a pipeline of functions, and the set of functions is a value the
+// caller can see, enumerate and add to.
+//
+// AND IT IS HOW THE PACKAGE STAYS `core`.  A filter is
+// `fn(TeraValue, [TeraValue]) -> Result<TeraValue, TeraError>` — pure,
+// like everything else here.  A caller that wants a filter which reads
+// a file computes the value in its own code and puts it in the
+// context; a filter that could read would make every template render
+// an effect and cost this package its layer.
+//
+// THE BUILTINS ARE THE ONES THAT ARE ARITHMETIC.  What is not here is
+// as much the design as what is: no `date`, because formatting a
+// timestamp is calendar-nv's arithmetic and a dependency this package
+// should not make every consumer take; no `markdown`, because that is
+// markdown-nv and a `web` package depending on a `text` package to
+// render a filter nobody may use is the wrong direction — a caller
+// that wants it registers three lines; and nothing that fetches, reads
+// or measures the clock, because `core`.
+//
+// `safe` IS NOT A FILTER LIKE THE OTHERS and is documented as such
+// below: it is the one that turns autoescaping off for a value, which
+// makes it the one that can put a hole in a page.
+
+// TeraFilter is one named filter.
+pub struct TeraFilter
+    name: Str
+    // The value being filtered, then the arguments the template
+    // passed, in order.  `Err` when the filter refuses its input —
+    // `upper` on a list — which becomes an `ErrorFilterRefused` naming
+    // the filter and what it wanted.
+    apply: fn(teraval.TeraValue, [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+
+// TeraFilters is the set a render resolves names against.
+pub struct TeraFilters
+    filters: [TeraFilter]
+
+// builtin_filters is the set every render starts from.
+//
+// **Text**: `upper`, `lower`, `capitalize`, `title`, `trim`,
+// `trim_start`, `trim_end`, `truncate(n)`, `wordcount`, `replace(f,t)`,
+// `indent(n)`, `linebreaks`, `striptags`, `slugify`.
+//
+// **Collections**: `length`, `first`, `last`, `nth(n)`, `reverse`,
+// `join(sep)`, `sort`, `unique`, `slice(start, end)`, `map(field)`,
+// `filter(field, value)`, `group_by(field)`.
+//
+// **Numbers**: `abs`, `round`, `round(places)`, `int`, `float`,
+// `filesizeformat`.
+//
+// **Escaping and encoding**: `escape`, `escape_xml`, `safe`,
+// `urlencode`, `urlencode_strict`, `json_encode`.
+//
+// **Absence**: `default(v)`, which is what a template writes instead
+// of an `{% if %}` around every optional field.
+//
+// ```novo
+// use terafilter
+//
+// fn main() [io]
+//     let f = terafilter.builtin_filters()
+//     println(str.from_int(list.len(terafilter.filter_names(f))))
+// ```
+pub fn builtin_filters() -> TeraFilters []
+    todo("tera-nv.terafilter.builtin_filters")
+
+// no_filters is an empty set.
+//
+// For a caller rendering a template it does not trust and wants to
+// give exactly the filters it chose — which, with `EscapeAlways`, is
+// the shape a multi-tenant renderer needs.
+pub fn no_filters() -> TeraFilters []
+    todo("tera-nv.terafilter.no_filters")
+
+// with_filter is the set with one more filter.
+//
+// A name already present is REPLACED, so a caller can override a
+// builtin — which is how `truncate` becomes one that counts grapheme
+// clusters rather than bytes, for a caller that has unicode-nv.
+pub fn with_filter(fs: TeraFilters, f: TeraFilter) -> TeraFilters []
+    todo("tera-nv.terafilter.with_filter")
+
+// without_filter is the set with one removed.
+//
+// Named rather than left to the caller because removing `safe` is the
+// one edit a renderer of untrusted templates has to make, and it
+// should be one line.
+pub fn without_filter(fs: TeraFilters, name: Str) -> TeraFilters []
+    todo("tera-nv.terafilter.without_filter")
+
+// filter_names is every name in the set, sorted.
+//
+// For a diagnostic — an unknown filter's error carries a suggestion,
+// and the suggestion is found in this list — and for a caller
+// documenting what its templates may use.
+pub fn filter_names(fs: TeraFilters) -> [Str] []
+    todo("tera-nv.terafilter.filter_names")
+
+// get is a filter by name.
+pub fn get(fs: TeraFilters, name: Str) -> ?TeraFilter []
+    todo("tera-nv.terafilter.get")
+
+// filter builds a `TeraFilter` from a name and a function.
+//
+// The constructor, so a caller writes `terafilter.filter("markdown",
+// render_markdown)` rather than a struct literal with a field name in
+// it.
+pub fn filter(name: Str,
+              apply: fn(teraval.TeraValue, [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>) -> TeraFilter []
+    todo("tera-nv.terafilter.filter")
+
+// refuse builds the error a filter returns when it will not accept its
+// input.
+//
+// So that every filter's refusal reads the same and names the same two
+// things: which filter, and what it wanted.  A filter that returned a
+// hand-built error would be a filter whose message did not match the
+// others.
+pub fn refuse(name: Str, wanted: Str, got: teraval.TeraValue) -> teraerror.TeraError []
+    todo("tera-nv.terafilter.refuse")
+
+// ── Tests, which are a different registry ────────────────────────────
+//
+// `{% if x is defined %}` and `{% if n is odd %}`.  Jinja2 calls them
+// tests and they are not filters: a test answers a Bool about a value
+// and takes it as a subject rather than transforming it, and mixing
+// the two namespaces is how `{{ x | defined }}` ends up meaning
+// something.
+
+// TeraTest is one named test.
+pub struct TeraTest
+    name: Str
+    check: fn(teraval.TeraValue, [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+
+// TeraTests is the set a render resolves `is` against.
+pub struct TeraTests
+    tests: [TeraTest]
+
+// builtin_tests is the set every render starts from.
+//
+// `defined`, `undefined`, `null`, `string`, `number`, `odd`, `even`,
+// `divisibleby(n)`, `starting_with(s)`, `ending_with(s)`,
+// `containing(v)`, `matching(pattern)`.
+//
+// `defined` is the important one: it is the only way a template can
+// ask about a variable that is not there, because reading one is an
+// error.
+pub fn builtin_tests() -> TeraTests []
+    todo("tera-nv.terafilter.builtin_tests")
+
+// with_test is the set with one more test.
+pub fn with_test(ts: TeraTests, t: TeraTest) -> TeraTests []
+    todo("tera-nv.terafilter.with_test")
+
+// test_names is every test name, sorted.
+pub fn test_names(ts: TeraTests) -> [Str] []
+    todo("tera-nv.terafilter.test_names")

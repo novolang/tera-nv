@@ -1,0 +1,153 @@
+// teraerror.nv — what went wrong, where, and through which include.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A TEMPLATE ERROR THAT DOES NOT NAME A LINE IS NOT AN ERROR REPORT.
+// The whole reason a template engine is worth using rather than string
+// concatenation is that a template is a file somebody edits, and the
+// moment it breaks the only useful thing an engine can say is which
+// file, which line, and what it was looking at.  "undefined variable"
+// on its own is a search.
+//
+// AND THE CHAIN IS HALF OF IT.  A page extends a base, which includes
+// a header, which includes a nav — and the variable that was missing
+// was missing in the nav, referenced from a block the page defined.
+// One line number describes none of that.  `TeraError.chain` is the
+// stack of templates that were being rendered, innermost first, each
+// with the line in it that led to the next, which is the same shape a
+// backtrace has and for the same reason.
+
+// TeraSpan is a position in one template.
+pub struct TeraSpan
+    // The name the template was added to the set under — a file path,
+    // usually, but this package never opens a file so it is whatever
+    // the caller called it.
+    template: Str
+    // 1-based, because a template is a file a person edits and an
+    // editor counts from 1.
+    line: Int
+    // 1-based, in BYTES rather than in columns.  Bytes because that is
+    // what a caller slices with; a display column would need a Unicode
+    // width table for an error message, which is a dependency an error
+    // message should not carry.
+    column: Int
+    // The byte offset into the template source, for a caller that
+    // wants to point at the text itself.
+    offset: Int
+
+// TeraFrame is one level of the include and extends stack.
+pub struct TeraFrame
+    // Where in this template the next one was reached from.
+    at: TeraSpan
+    // How: an include, an extends, a block being overridden, or a
+    // macro being called.
+    how: TeraFrameKind
+
+// TeraFrameKind says how one template reached another.
+pub enum TeraFrameKind
+    FrameInclude
+    FrameExtends
+    // A block defined in a child template, rendered where the parent
+    // put it.  The one a reader cannot work out from the file, because
+    // the text is in one template and the position is in another.
+    FrameBlock(name: Str)
+    FrameMacro(name: Str)
+
+// TeraErrorKind is what went wrong.
+//
+// A named set rather than a message string, so that a caller can
+// branch: a missing template is something a host can go and read, and
+// a syntax error is not.
+pub enum TeraErrorKind
+    // The template did not parse.  `found` is what was there.
+    ErrorSyntax(found: Str)
+    // A tag that was opened and never closed — `{% for %}` with no
+    // `{% endfor %}`.
+    ErrorUnclosed(tag: Str)
+    // An `{% endfor %}` with no `{% for %}`, or an `{% else %}` where
+    // nothing branches.
+    ErrorUnexpectedTag(tag: Str)
+    // A name the context does not hold.  The most common error there
+    // is, and the reason it names the variable and not just the line.
+    ErrorUnknownVariable(name: Str)
+    // A field or index the value does not have.
+    ErrorNoSuchField(path: Str)
+    // A filter name the registry does not hold.  `suggestion` is the
+    // nearest name that is in it, or empty — a misspelled filter is
+    // the second most common error and a suggestion turns it into a
+    // typo.
+    ErrorUnknownFilter(name: Str, suggestion: Str)
+    // A filter refused its input: `upper` on a list, `length` on a
+    // number.  `filter` names it and `because` says what it wanted.
+    ErrorFilterRefused(filter: Str, because: Str)
+    // A template referenced a template the set does not hold.  THE ONE
+    // A HOST CAN ACT ON: it means "go and read this file, add it, and
+    // render again", which is what `terarender.missing` is for.
+    ErrorTemplateNotFound(name: Str)
+    // `{% extends %}` cycles, or an include includes itself.
+    ErrorCycle(name: Str)
+    // A `{% block %}` name defined twice in one template.
+    ErrorDuplicateBlock(name: Str)
+    // A render bound in `TeraLimits` was reached.
+    ErrorLimit(what: Str)
+
+// TeraError is one failure, with everything needed to report it.
+pub struct TeraError
+    kind: TeraErrorKind
+    // Where it happened.
+    at: TeraSpan
+    // How the renderer got there, innermost first.  Empty for an error
+    // in the template the caller asked for directly.
+    chain: [TeraFrame]
+
+// What went wrong, in words, for a caller that logs rather than
+// branches.
+//
+// `Result<_, TeraError>` requires it: SPEC § 3.4 admits a `Result`
+// error type only if it implements `Error`, so this impl is what lets
+// every function in the package name its own refusal instead of
+// returning `Result<_, Str>`.
+impl Error for TeraError
+    fn message(self) -> Str
+        todo("tera-nv.teraerror.TeraError.message")
+
+// report is the error as a caller should print it: the message, the
+// position, the source line, a caret, and the chain.
+//
+// It takes the sources because the error does not hold them — an error
+// value that carried a copy of every template it passed through would
+// be an error value nobody wanted to keep.  `sources` is name-and-text
+// pairs, which is what a `TeraSet` can hand over.
+//
+// ```novo ignore
+// unknown variable `user.nmae` in `nav.html`, line 4
+//   4 |   <a href="/u/{{ user.nmae }}">
+//     |                  ^^^^^^^^^
+//   included from `header.html`, line 12
+//   included from `base.html`, line 3
+//   in block `content` of `page.html`, line 8
+// ```
+pub fn report(e: TeraError, sources: [TeraSource]) -> Str []
+    todo("tera-nv.teraerror.report")
+
+// TeraSource is a template's name and its text, for `report`.
+pub struct TeraSource
+    name: Str
+    text: Str
+
+// one_line is the error without the source excerpt.
+//
+// For a log, where the caret is noise: `nav.html:4:18: unknown
+// variable `user.nmae``.
+pub fn one_line(e: TeraError) -> Str []
+    todo("tera-nv.teraerror.one_line")
+
+// missing_template is the name a `ErrorTemplateNotFound` names, or
+// `None` for any other error.
+//
+// The one question a host asks of an error without looking at it: is
+// this something I can fix by reading a file.  A function rather than
+// a match at every call site, because the render loop that asks it is
+// the shape this whole package is built around.
+pub fn missing_template(e: TeraError) -> ?Str []
+    todo("tera-nv.teraerror.missing_template")

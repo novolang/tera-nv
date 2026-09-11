@@ -1,0 +1,169 @@
+// teraval_tests.nv — the API suite for the values and the context.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`.
+//
+// THE VALUE MODEL IS WHERE A TEMPLATE ENGINE'S SURPRISES LIVE.  Every
+// case here is one a template author will meet and be unable to
+// explain without the rule written down: why `3` and not `3.0`, why
+// the map iterated in that order, why `{{ items }}` printed JSON, and
+// what `{% if %}` decided on.
+
+use std.test
+use std.list
+use teraval
+
+@test
+fn test_int_and_float_are_separate_which_json_does_not_do() [io]
+    // `{{ count }}` rendering `3` rather than `3.0` is the difference
+    // between a page a reader trusts and one they do not.
+    test.case("an int renders as digits")
+    test.assert(teraval.to_display(ValueInt(3)) == "3")
+
+    test.case("a float renders with a point, in the shortest form that round-trips")
+    test.assert(teraval.to_display(ValueFloat(3.0)) == "3.0")
+    test.assert(teraval.to_display(ValueFloat(0.1)) == "0.1")
+
+    test.case("and they are still the same number for a comparison")
+    test.assert(teraval.equals(ValueInt(3), ValueFloat(3.0)))
+
+    test.case("the type names are what an error message's last words are")
+    test.assert(teraval.type_name(ValueInt(1)) == "int")
+    test.assert(teraval.type_name(ValueFloat(1.0)) == "float")
+    test.assert(teraval.type_name(ValueList([])) == "list")
+
+@test
+fn test_a_container_renders_as_json_rather_than_as_nothing() [io]
+    // Not usually what the author meant, and much better than an empty
+    // string: the page then shows what went wrong instead of hiding
+    // it.
+    test.case("a list")
+    test.assert(teraval.to_display(ValueList([ValueInt(1), ValueInt(2)]))
+                == "[1,2]")
+
+    test.case("a map")
+    let m = ValueMap([TeraPair { key: "a", value: ValueInt(1) }])
+    test.assert(teraval.to_display(m) == "{\"a\":1}")
+
+    test.case("null renders as nothing, which IS what the author meant")
+    test.assert(teraval.to_display(ValueNull) == "")
+
+    test.case("and to_json is the filter, and escapes what JSON escapes")
+    test.assert(teraval.to_json(ValueStr("a\"b")) == "\"a\\\"b\"")
+
+@test
+fn test_a_map_keeps_insertion_order_so_two_builds_diff_cleanly() [io]
+    // A page whose nav reorders itself on every build is a page whose
+    // diff is useless.
+    let m = ValueMap([TeraPair { key: "z", value: ValueInt(1) },
+                      TeraPair { key: "a", value: ValueInt(2) }])
+
+    test.case("the pairs are in the order they were written")
+    match m
+        ValueMap(pairs) =>
+            test.assert(list.get(pairs, 0).key == "z")
+        _               =>
+            test.assert(false)
+
+    test.case("and two maps with the same pairs are equal whatever the order")
+    let n = ValueMap([TeraPair { key: "a", value: ValueInt(2) },
+                      TeraPair { key: "z", value: ValueInt(1) }])
+    test.assert(teraval.equals(m, n))
+
+    test.case("but two lists are equal only in the same order")
+    test.assert(teraval.equals(ValueList([ValueInt(1), ValueInt(2)]),
+                               ValueList([ValueInt(2), ValueInt(1)])) == false)
+
+@test
+fn test_the_context_is_a_value_so_a_base_can_be_shared_across_pages() [io]
+    // What a site generator rendering 58 pages does: build the site's
+    // variables once, add each page's own, and never have the two
+    // interfere.
+    let base = teraval.context_insert(teraval.context_new(),
+                                      "site", ValueStr("novo-lang"))
+    let page = teraval.context_insert(base, "title", ValueStr("Home"))
+
+    test.case("the page context has both")
+    test.assert(teraval.context_get(page, "site") == Some(ValueStr("novo-lang")))
+    test.assert(teraval.context_get(page, "title") == Some(ValueStr("Home")))
+
+    test.case("and the base still has only its own")
+    test.assert(teraval.context_get(base, "title") == None)
+
+    test.case("a name inserted twice is replaced and keeps its position")
+    let over = teraval.context_insert(page, "site", ValueStr("other"))
+    test.assert(teraval.context_get(over, "site") == Some(ValueStr("other")))
+    test.assert(list.get(teraval.context_names(over), 0) == "site")
+
+    test.case("and the names are what an unknown-variable error suggests from")
+    test.assert(list.len(teraval.context_names(page)) == 2)
+
+@test
+fn test_a_context_can_come_straight_out_of_a_deserialised_value() [io]
+    // The bridge from serde-nv or std.json: a caller that parsed JSON
+    // renders with it directly rather than converting twice.
+    let m = ValueMap([TeraPair { key: "a", value: ValueInt(1) }])
+
+    test.case("a map becomes a context")
+    match teraval.context_from_map(m)
+        None      =>
+            test.assert(false)
+        Some(ctx) =>
+            test.assert(teraval.context_get(ctx, "a") == Some(ValueInt(1)))
+
+    test.case("and a list does not, because a template's context has names")
+    test.assert(teraval.context_from_map(ValueList([])) == None)
+
+@test
+fn test_lookup_tells_the_two_failures_apart() [io]
+    // A field that does not exist and an index into a string are
+    // different answers a caller needs to distinguish, which is why
+    // this returns a Result rather than an Option.
+    let user = ValueMap([TeraPair { key: "name", value: ValueStr("n") },
+                         TeraPair { key: "tags",
+                                    value: ValueList([ValueStr("a")]) }])
+
+    test.case("a dotted path")
+    match teraval.lookup(user, "name")
+        Err(_) =>
+            test.assert(false)
+        Ok(v)  =>
+            test.assert(v == ValueStr("n"))
+
+    test.case("a list index, with the same syntax a template writes")
+    match teraval.lookup(user, "tags.0")
+        Err(_) =>
+            test.assert(false)
+        Ok(v)  =>
+            test.assert(v == ValueStr("a"))
+
+    test.case("a field that is not there")
+    match teraval.lookup(user, "email")
+        Ok(_)  =>
+            test.assert(false)
+        Err(e) =>
+            match e.kind
+                ErrorNoSuchField(_) =>
+                    test.assert(true)
+                _                   =>
+                    test.assert(false)
+
+    test.case("an index past the end is also no such field")
+    match teraval.lookup(user, "tags.9")
+        Ok(_)  =>
+            test.assert(false)
+        Err(_) =>
+            test.assert(true)
+
+@test
+fn test_compare_refuses_to_order_values_of_different_kinds() [io]
+    // Inventing an ordering between a string and a number is how
+    // `{% if a < b %}` silently means something nobody intended.
+    test.case("numbers order as numbers")
+    test.assert(teraval.compare(ValueInt(1), ValueInt(2)) == Some(0 - 1))
+    test.assert(teraval.compare(ValueFloat(2.0), ValueInt(1)) == Some(1))
+
+    test.case("strings order as bytes")
+    test.assert(teraval.compare(ValueStr("a"), ValueStr("b")) == Some(0 - 1))
+
+    test.case("and a string against a number is not an ordering question")
+    test.assert(teraval.compare(ValueStr("a"), ValueInt(1)) == None)

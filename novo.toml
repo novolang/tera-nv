@@ -1,0 +1,61 @@
+[package]
+name        = "tera-nv"
+version     = "0.0.1"
+description = "The Tera and Jinja2 template language, sans-IO: a template parsed once and rendered many times, a set of templates the caller fills so that `extends` and `include` resolve without the engine ever opening a file, filters and tests as registries the caller extends, autoescaping on by default through html-nv's own escape, and errors that name the template, the line and the include chain that reached it.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`, and the interesting half of that claim is `{% extends %}`.
+# A template that inherits needs another template, and a core package
+# cannot open a file — so `TeraSet` holds templates by name in memory,
+# `set_missing` reports the names that are referenced and absent, and
+# the host reads them and adds them.  The core says what it needs; the
+# host performs.  That is the shape `planning/ORBIT-INTERFACES.md`
+# asks for, and it is also what lets a template set come out of a zip
+# archive, a database or a compiled-in constant with no change here.
+layer       = "core"
+
+category    = "web"
+
+tags        = ["tera", "jinja2", "template", "templating", "render", "autoescape", "inheritance", "filters", "sans-io"]
+repository  = "https://github.com/novolang/tera-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "The Tera template language, without the filesystem"
+
+[dependencies]
+# A PATH DEPENDENCY ON A SIBLING IN THIS LANE, and the coordinator
+# converts it to `^0.0.1` at publish — a path dependency is refused by
+# `novo pkg publish`, which is the rule that keeps a published tarball
+# from sending every consumer to a directory on somebody else's
+# machine.
+#
+# html-nv, FOR AUTOESCAPING AND FOR NOTHING ELSE.  A template engine
+# for the web whose default is not to escape produces cross-site
+# scripting; one whose escape disagrees with the HTML package the same
+# program uses produces a page with two escaping rules in it.  So
+# `{{ x }}` in an autoescaped template is `htmlsafe.escape_attr`, the
+# same function `htmlwrite` uses on the way out, and
+# `terarender.escape` republishes it so a caller writing a filter that
+# produces markup escapes the same way.
+#
+# What this package does NOT take from html-nv: the parser, the tree,
+# the selectors and the sanitiser.  A template engine does not parse
+# its own output.
+#
+# `core`, so `dep-layer` holds.  It is written as a path here because
+# the two packages are developed together in one tree and html-nv is
+# not on the registry yet; publish html-nv first, because a package
+# cannot be published ahead of what it depends on.
+html-nv = "^0.0.1"

@@ -1,0 +1,173 @@
+// terarender.nv — a template and a context into bytes the caller owns.
+//
+// Every body here is a `todo()`; the signatures are the design.
+
+use teraval
+use teraparse
+use terafilter
+use teraerror
+
+// NOTHING HERE WRITES.  `render` appends to the caller's buffer and
+// returns it, so a site generator renders 58 pages into one buffer and
+// writes once, and a test asserts on bytes with no file anywhere.
+//
+// AUTOESCAPING IS ON, AND IT IS html-nv's ESCAPE.  A template engine
+// for the web whose default is not to escape is a template engine that
+// produces cross-site scripting, and a template engine whose escape
+// disagrees with the HTML package the same program uses is one where
+// two functions in one page escape differently.  `{{ x }}` in an
+// autoescaped template is `htmlsafe.escape_text`; `{{ x }}` inside an
+// attribute is not distinguishable from one outside it by a template
+// engine, so the escape used is the ATTRIBUTE one — five characters —
+// everywhere.  Escaping more than necessary is a rendering nobody
+// notices; escaping less is a hole.
+//
+// `{{ x | safe }}` TURNS IT OFF FOR ONE VALUE, and that is the whole
+// of the escape hatch.  A template that needs raw HTML says so at the
+// point it needs it, in a way a reviewer can grep for.
+//
+// THE CONTROL STRUCTURES ARE THE ONES A PAGE NEEDS AND NO MORE:
+// `{% if %}` / `{% elif %}` / `{% else %}`, `{% for %}` with `{% else %}`
+// for the empty case, `{% set %}`, `{% include %}`, `{% extends %}`
+// with `{% block %}` and `{{ super() }}`, `{% macro %}` and
+// `{% import %}`, `{% filter %}` blocks, `{% raw %}`, and `{# #}`
+// comments.  What is NOT there: no `{% while %}`, because a template
+// that can loop unboundedly is a template that can hang a render; no
+// arbitrary expression evaluation beyond the comparison and boolean
+// operators; and no way to call anything the caller did not register.
+
+// TeraRender is the result of a render that produced output.
+//
+// The bytes, and what the render learned on the way — which a caller
+// building an incremental site generator needs, because "this page
+// depends on these templates" is what decides whether to re-render it
+// next time.
+pub struct TeraRender
+    // The caller's buffer, with the page appended.
+    out: [u8]
+    // Every template that was actually used: the one asked for, the
+    // one it extends, and every include reached.  A dependency edge, so
+    // an incremental build can invalidate exactly the pages a changed
+    // include affects.
+    used: [Str]
+    // How many loop iterations the render performed, against
+    // `TeraLimits.max_iterations`.  Reported so a caller can see it
+    // getting close rather than only when it trips.
+    iterations: Int
+
+// render appends a template's output to a caller's buffer.
+//
+// The whole engine in one call: the set, the name, the context, the
+// filters and the tests.  Everything else in this module is a
+// convenience over it or a question about it.
+//
+// ```novo
+// use teraparse
+// use teraval
+// use terafilter
+// use terarender
+//
+// fn main() [io]
+//     match teraparse.set_add(teraparse.set_new(), "p.html", "<h1>{{ t }}</h1>")
+//         Err(_) =>
+//             println("did not parse")
+//         Ok(set) =>
+//             let ctx = teraval.context_insert(teraval.context_new(),
+//                                              "t", ValueStr("Home"))
+//             match terarender.render([], set, "p.html", ctx,
+//                                     terafilter.builtin_filters(),
+//                                     terafilter.builtin_tests())
+//                 Err(_) =>
+//                     println("did not render")
+//                 Ok(r)  =>
+//                     println(str.from_int(list.len(r.out)))
+// ```
+pub fn render(out: [u8], set: teraparse.TeraSet, name: Str, ctx: teraval.TeraContext,
+              filters: terafilter.TeraFilters,
+              tests: terafilter.TeraTests) -> Result<TeraRender, teraerror.TeraError> []
+    todo("tera-nv.terarender.render")
+
+// render_with is `render` with limits of the caller's choosing.
+//
+// For a caller rendering a template it did not write, where the
+// defaults are too generous.
+pub fn render_with(out: [u8], set: teraparse.TeraSet, name: Str, ctx: teraval.TeraContext,
+                   filters: terafilter.TeraFilters, tests: terafilter.TeraTests,
+                   limits: teraparse.TeraLimits) -> Result<TeraRender, teraerror.TeraError> []
+    todo("tera-nv.terarender.render_with")
+
+// render_str is `render` into a fresh string, with the builtin filters
+// and tests.
+//
+// The convenience, and the one most callers will use.  It allocates,
+// which is the whole difference from `render`.
+pub fn render_str(set: teraparse.TeraSet, name: Str,
+                  ctx: teraval.TeraContext) -> Result<Str, teraerror.TeraError> []
+    todo("tera-nv.terarender.render_str")
+
+// render_one is a single template with no set at all.
+//
+// For the case a template engine is most often reached for and least
+// often documented: one string, one context, no files, no includes.
+// A template that uses `{% extends %}` or `{% include %}` fails with
+// `ErrorTemplateNotFound`, which is the honest answer rather than a
+// silent empty expansion.
+pub fn render_one(source: Str, ctx: teraval.TeraContext) -> Result<Str, teraerror.TeraError> []
+    todo("tera-nv.terarender.render_one")
+
+// escape is the escape an autoescaped template applies.
+//
+// html-nv's `escape_attr` — `&`, `<`, `>`, `"` and `'` — published
+// here so that a caller writing a filter which produces markup can
+// escape the parts that are not markup with exactly the function the
+// renderer would have used.  A filter that escaped differently would
+// be a filter that produced a page with two escaping rules in it.
+pub fn escape(text: Str) -> Str []
+    todo("tera-nv.terarender.escape")
+
+// escape_into appends the escaped text to a caller's buffer.
+pub fn escape_into(out: [u8], text: Str) -> [u8] []
+    todo("tera-nv.terarender.escape_into")
+
+// loop_variable_names is the names available inside a `{% for %}`.
+//
+// `loop.index` (1-based), `loop.index0`, `loop.first`, `loop.last`,
+// `loop.length`.  Published as a list rather than only documented so
+// that a caller checking a template's variables against its context
+// can tell a loop variable from a missing one — otherwise
+// `teraparse.variables` reports `loop` and a build-time check fails on
+// every template that has a `for` in it.
+pub fn loop_variable_names() -> [Str] []
+    todo("tera-nv.terarender.loop_variable_names")
+
+// missing is the template name an error says was not found, or `None`.
+//
+// The render loop's other half, beside `teraparse.set_missing`: a
+// template that computes an include name cannot be reported before the
+// render, so the host handles it here, reads the file, adds it and
+// renders again.
+//
+// ```novo ignore
+// var attempt = render(...)
+// while let Err(e) = attempt
+//     match terarender.missing(e)
+//         None       =>
+//             break                      // a real error, not a missing file
+//         Some(name) =>
+//             set = add(set, name, read(name))     // the host reads
+//             attempt = render(...)
+// ```
+pub fn missing(e: teraerror.TeraError) -> ?Str []
+    todo("tera-nv.terarender.missing")
+
+// render_block renders one block of a template on its own.
+//
+// For a caller that wants a fragment rather than a page — the answer
+// to an interactive request that replaces one part of a document
+// without re-rendering the layout around it.  The block is rendered in
+// the same context and with the same inheritance as it would be in the
+// whole page, so the two cannot disagree.
+pub fn render_block(out: [u8], set: teraparse.TeraSet, name: Str, block: Str,
+                    ctx: teraval.TeraContext, filters: terafilter.TeraFilters,
+                    tests: terafilter.TeraTests) -> Result<TeraRender, teraerror.TeraError> []
+    todo("tera-nv.terarender.render_block")

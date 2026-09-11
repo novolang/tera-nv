@@ -1,0 +1,239 @@
+// teraparse_tests.nv — the API suite for the template set, the
+// inheritance, and the errors.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`.
+//
+// THIS IS THE SUITE FOR THE SANS-IO CLAIM.  `{% extends %}` needs
+// another template and a `core` package cannot open a file, so the
+// whole of how that works is `set_missing` and the host loop around
+// it — and if that shape is wrong, the package's layer is wrong.
+//
+// AND FOR THE ERROR REPORTS, because a template error that does not
+// name a line is not an error report, and one that does not name the
+// include chain describes the wrong file.
+
+use std.test
+use std.list
+use teraval
+use teraparse
+use terafilter
+use terarender
+use teraerror
+
+// A template that does not parse is kept out of the set rather than
+// failing the helper: every case below that wants a parse failure
+// asserts on `parse` directly, so here a bad template is simply absent
+// and whatever the case asserts next says so.
+fn add_or_keep(s: teraparse.TeraSet, name: Str, text: Str) -> teraparse.TeraSet [io]
+    match teraparse.set_add(s, name, text)
+        Err(_)   =>
+            s
+        Ok(next) =>
+            next
+
+fn set_of(pairs: [teraerror.TeraSource]) -> teraparse.TeraSet [io]
+    var s = teraparse.set_new()
+    for p in pairs
+        s = add_or_keep(s, p.name, p.text)
+    s
+
+@test
+fn test_set_missing_is_how_a_core_package_asks_for_a_file() [io]
+    // The load-bearing interface: the core says what it needs, the
+    // host reads it and adds it, and the loop runs until nothing is
+    // missing.
+    let one = set_of([TeraSource { name: "page.html",
+                                   text: "{% extends \"base.html\" %}" }])
+
+    test.case("a template that extends one the set does not hold reports it")
+    let missing = teraparse.set_missing(one)
+    test.assert(list.len(missing) == 1)
+    test.assert(list.get(missing, 0) == "base.html")
+
+    test.case("adding it empties the list")
+    let two = set_of([TeraSource { name: "page.html",
+                                   text: "{% extends \"base.html\" %}" },
+                      TeraSource { name: "base.html", text: "<html></html>" }])
+    test.assert(list.len(teraparse.set_missing(two)) == 0)
+
+    test.case("an include is reported the same way")
+    let inc = set_of([TeraSource { name: "p.html",
+                                   text: "{% include \"nav.html\" %}" }])
+    test.assert(list.len(teraparse.set_missing(inc)) == 1)
+
+    test.case("and transitively — base includes header, which the set also lacks")
+    let chain = set_of([TeraSource { name: "p.html",
+                                     text: "{% extends \"b.html\" %}" },
+                        TeraSource { name: "b.html",
+                                     text: "{% include \"h.html\" %}" }])
+    test.assert(list.len(teraparse.set_missing(chain)) == 1)
+    test.assert(list.get(teraparse.set_missing(chain), 0) == "h.html")
+
+@test
+fn test_a_computed_include_name_cannot_be_reported_before_the_render() [io]
+    // Saying so is better than a promise that quietly does not hold:
+    // `set_missing` reports the LITERAL references, and a template
+    // that computes a name still fails at render with a name the host
+    // can act on.
+    let s = set_of([TeraSource { name: "p.html",
+                                 text: "{% include partial %}" }])
+
+    test.case("nothing is missing before the render")
+    test.assert(list.len(teraparse.set_missing(s)) == 0)
+
+    test.case("because the reference is not a literal name")
+    test.assert(list.len(teraparse.references(unwrap(teraparse.set_get(s, "p.html"))))
+                == 0)
+
+    test.case("and the render's error names the file the host has to read")
+    let ctx = teraval.context_insert(teraval.context_new(), "partial",
+                                     ValueStr("nav.html"))
+    match terarender.render([], s, "p.html", ctx,
+                            terafilter.builtin_filters(),
+                            terafilter.builtin_tests())
+        Ok(_)  =>
+            test.assert(false)
+        Err(e) =>
+            test.assert(terarender.missing(e) == Some("nav.html"))
+
+fn unwrap(t: ?teraparse.TeraTemplate) -> teraparse.TeraTemplate
+    match t
+        None    =>
+            todo("teraparse_tests.unwrap — the set did not hold the template")
+        Some(v) =>
+            v
+
+@test
+fn test_a_template_answers_what_a_caller_may_ask_of_it() [io]
+    // The AST is not public; these are.
+    match teraparse.parse("p.html",
+                          "{% extends \"b.html\" %}{% block main %}{{ u.name | upper }}{% endblock %}")
+        Err(_) =>
+            test.assert(false)
+        Ok(t)  =>
+            test.case("the name and the source come back")
+            test.assert(teraparse.template_name(t) == "p.html")
+            test.assert(str.contains(teraparse.template_source(t), "extends"))
+
+            test.case("what it extends, and what it references")
+            test.assert(teraparse.extends_name(t) == Some("b.html"))
+            test.assert(list.len(teraparse.references(t)) == 1)
+
+            test.case("the blocks it defines — a typo here is a silent hole in a page")
+            test.assert(list.len(teraparse.blocks(t)) == 1)
+            test.assert(list.get(teraparse.blocks(t), 0) == "main")
+
+            test.case("the top-level variables it reads, so a context can be checked")
+            test.assert(list.get(teraparse.variables(t), 0) == "u")
+
+            test.case("and the filters it applies, so a registry can be checked")
+            test.assert(list.get(teraparse.filters_used(t), 0) == "upper")
+
+@test
+fn test_set_check_finds_at_build_time_what_would_be_a_hole_at_render_time() [io]
+    test.case("a block a child overrides that no parent defines")
+    let typo = set_of([TeraSource { name: "b.html",
+                                    text: "{% block content %}{% endblock %}" },
+                       TeraSource { name: "p.html",
+                                    text: "{% extends \"b.html\" %}{% block contnet %}x{% endblock %}" }])
+    test.assert(list.len(teraparse.set_check(typo)) == 1)
+
+    test.case("a correct pair reports nothing")
+    let fine = set_of([TeraSource { name: "b.html",
+                                    text: "{% block content %}{% endblock %}" },
+                       TeraSource { name: "p.html",
+                                    text: "{% extends \"b.html\" %}{% block content %}x{% endblock %}" }])
+    test.assert(list.len(teraparse.set_check(fine)) == 0)
+
+    test.case("and a cycle in extends is found rather than recursed into")
+    let cycle = set_of([TeraSource { name: "a.html",
+                                     text: "{% extends \"b.html\" %}" },
+                        TeraSource { name: "b.html",
+                                     text: "{% extends \"a.html\" %}" }])
+    test.assert(list.len(teraparse.set_check(cycle)) > 0)
+
+@test
+fn test_a_syntax_error_names_the_line_and_what_it_found() [io]
+    test.case("an unclosed tag")
+    match teraparse.parse("p.html", "a\n{% for x in xs %}\nb\n")
+        Ok(_)  =>
+            test.assert(false)
+        Err(e) =>
+            test.assert(e.at.line == 2)
+            match e.kind
+                ErrorUnclosed(tag) =>
+                    test.assert(tag == "for")
+                _                  =>
+                    test.assert(false)
+
+    test.case("an end tag with nothing open")
+    match teraparse.parse("p.html", "{% endfor %}")
+        Ok(_)  =>
+            test.assert(false)
+        Err(e) =>
+            match e.kind
+                ErrorUnexpectedTag(_) =>
+                    test.assert(true)
+                _                     =>
+                    test.assert(false)
+
+    test.case("the one-line form is what a log wants")
+    match teraparse.parse("p.html", "{% endfor %}")
+        Ok(_)  =>
+            test.assert(false)
+        Err(e) =>
+            test.assert(str.contains(teraerror.one_line(e), "p.html:1:"))
+
+@test
+fn test_an_unknown_filter_suggests_the_name_that_was_meant() [io]
+    // A misspelled filter is the second most common template error and
+    // a suggestion turns it from a search into a typo.
+    let s = set_of([TeraSource { name: "p.html", text: "{{ x | uppr }}" }])
+    let ctx = teraval.context_insert(teraval.context_new(), "x", ValueStr("a"))
+
+    match terarender.render([], s, "p.html", ctx,
+                            terafilter.builtin_filters(),
+                            terafilter.builtin_tests())
+        Ok(_)  =>
+            test.assert(false)
+        Err(e) =>
+            test.case("the error names the filter")
+            match e.kind
+                ErrorUnknownFilter(name, suggestion) =>
+                    test.assert(name == "uppr")
+                    test.assert(suggestion == "upper")
+                _                                    =>
+                    test.assert(false)
+
+@test
+fn test_the_chain_is_half_the_error_report() [io]
+    // A page extends a base, which includes a nav, and the variable
+    // that was missing was missing in the nav.  One line number
+    // describes none of that.
+    let s = set_of([TeraSource { name: "nav.html", text: "{{ user.name }}" },
+                    TeraSource { name: "base.html",
+                                 text: "<body>\n{% include \"nav.html\" %}\n</body>" },
+                    TeraSource { name: "page.html",
+                                 text: "{% extends \"base.html\" %}" }])
+
+    match terarender.render([], s, "page.html", teraval.context_new(),
+                            terafilter.builtin_filters(),
+                            terafilter.builtin_tests())
+        Ok(_)  =>
+            test.assert(false)
+        Err(e) =>
+            test.case("the position is in the template the error is IN")
+            test.assert(e.at.template == "nav.html")
+
+            test.case("and the chain says how the renderer got there")
+            test.assert(list.len(e.chain) == 2)
+            test.assert(list.get(e.chain, 0).how == FrameInclude)
+
+            test.case("the report shows the source line and the chain")
+            let text = teraerror.report(e, teraparse.set_sources(s))
+            test.assert(str.contains(text, "nav.html"))
+            test.assert(str.contains(text, "base.html"))
+            test.assert(str.contains(text, "user.name"))
+
+            test.case("and a host asks one question of an error without matching on it")
+            test.assert(teraerror.missing_template(e) == None)

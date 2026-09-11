@@ -1,0 +1,243 @@
+// teraparse.nv — a template's text into a template, and a set of them
+// into something renderable.
+//
+// Every body here is a `todo()`; the signatures are the design.
+
+use teraerror
+
+// A TEMPLATE IS PARSED ONCE AND RENDERED MANY TIMES.  That is the
+// whole reason `TeraTemplate` exists as a value rather than `render`
+// taking a string: a site generator renders one layout 58 times, and
+// parsing it 58 times is 57 wasted parses.
+//
+// THE AST IS NOT PUBLIC, and that is deliberate.  `TeraTemplate` is
+// opaque: `parse` produces it, `render` consumes it, and nothing else
+// may look inside.  Publishing the node types would make every
+// addition to the template language — a new tag, a new expression form
+// — a breaking change to a type nobody outside this package has a use
+// for.  What IS public is everything a caller can act on: the names a
+// template references, the blocks it defines, and the template it
+// extends.
+//
+// `TeraSet` IS THE SANS-IO ANSWER, and it is the load-bearing
+// interface of this package.  `{% extends "base.html" %}` and
+// `{% include "nav.html" %}` need another template, and a `core`
+// package cannot open a file.  So the set holds templates by name, in
+// memory, the caller puts them there, and `missing` reports the names
+// that are referenced and absent.  The host loop is:
+//
+//     read what you have, add it, ask what is missing, read that,
+//     repeat until nothing is missing, then render
+//
+// which is the state machine the layer design asks for: the core says
+// what it needs, the host performs.  It also means a template set can
+// be assembled from a database, a zip archive or a compiled-in
+// constant with no change to this package at all.
+
+// TeraTemplate is one parsed template.
+//
+// Opaque.  Its contents are this package's business and may change
+// within a minor version; `references`, `blocks` and `extends_name`
+// are the questions a caller may ask of one.
+pub struct TeraTemplate
+    // The name it was parsed under, carried so that an error can say
+    // which file.
+    name: Str
+    // The source, kept for error reporting — an error that can show
+    // the line is worth the bytes, and the caller handed the string
+    // over anyway.
+    source: Str
+    // The compiled program.  Its encoding is private.
+    program: [Int]
+
+// TeraSet is every template a render can reach, by name.
+pub struct TeraSet
+    names: [Str]
+    templates: [TeraTemplate]
+    // How the autoescape rule is decided.  On the set rather than on
+    // each template because it is a property of the caller's output,
+    // not of any one file, and because two templates in one render
+    // must not disagree about whether they are producing HTML.
+    escape: TeraEscape
+
+// TeraEscape says which templates are autoescaped.
+pub enum TeraEscape
+    // By the name's suffix — `.html`, `.htm`, `.xml`, `.xhtml` are
+    // escaped and everything else is not.  Tera's own rule, and the
+    // default, because it gets a site generator's `.html` layouts and
+    // its `.txt` mail templates both right with no configuration.
+    EscapeBySuffix
+    // Every template, whatever it is called.
+    EscapeAlways
+    // No template.  For a caller producing something that is not
+    // markup at all — a configuration file, a shell script — where
+    // escaping would corrupt the output.  Naming it is what makes
+    // choosing it visible in a review.
+    EscapeNever
+
+// TeraLimits bounds what a parse and a render will do.
+pub struct TeraLimits
+    // How deeply includes and extends may nest.
+    max_depth: Int
+    // How many loop iterations one render may perform in total.  The
+    // bound that matters: a template over a list a caller did not
+    // check is the one way a render does not terminate.
+    max_iterations: Int
+    // How many bytes a render may produce.  A template that expands
+    // its input a thousandfold is a memory exhaustion, and a caller
+    // rendering somebody else's template wants a ceiling.
+    max_output: Int
+
+// default_limits are bounds no real template reaches: 32 deep, ten
+// million iterations, sixty-four megabytes of output.
+pub fn default_limits() -> TeraLimits []
+    todo("tera-nv.teraparse.default_limits")
+
+// parse is one template's text into a template.
+//
+// ```novo
+// use teraparse
+//
+// fn main() [io]
+//     match teraparse.parse("page.html", "<h1>{{ title }}</h1>")
+//         Err(_) =>
+//             println("did not parse")
+//         Ok(t)  =>
+//             println(teraparse.template_name(t))
+// ```
+pub fn parse(name: Str, source: Str) -> Result<TeraTemplate, teraerror.TeraError> []
+    todo("tera-nv.teraparse.parse")
+
+// template_name is the name the template was parsed under.
+pub fn template_name(t: TeraTemplate) -> Str []
+    todo("tera-nv.teraparse.template_name")
+
+// template_source is the text it was parsed from.
+//
+// Public because `teraerror.report` needs it, and because a caller
+// holding only a set should be able to produce the sources that
+// function takes.
+pub fn template_source(t: TeraTemplate) -> Str []
+    todo("tera-nv.teraparse.template_source")
+
+// references is every other template this one names.
+//
+// From `{% extends %}` and every `{% include %}`.  Only the LITERAL
+// names: `{% include name_var %}` is a name known at render time and
+// cannot be reported here, which is why `missing` exists on the set as
+// well and why a render can still fail with `ErrorTemplateNotFound`
+// after `set_missing` came back empty.  Saying so is better than a
+// promise that quietly does not hold.
+pub fn references(t: TeraTemplate) -> [Str] []
+    todo("tera-nv.teraparse.references")
+
+// extends_name is the template this one extends, or `None`.
+pub fn extends_name(t: TeraTemplate) -> ?Str []
+    todo("tera-nv.teraparse.extends_name")
+
+// blocks is every block name this template defines.
+//
+// For a caller checking that a child template's blocks exist in the
+// parent — a typo in `{% block contnet %}` otherwise renders a page
+// with the content silently missing, which is the single most
+// frustrating template bug there is.
+pub fn blocks(t: TeraTemplate) -> [Str] []
+    todo("tera-nv.teraparse.blocks")
+
+// variables is every top-level variable name the template reads.
+//
+// `user.name` and `user.email` both report `user`.  For a caller
+// building a context and wanting to know what is wanted, and for a
+// build-time check that every name a template uses is one the program
+// supplies.
+pub fn variables(t: TeraTemplate) -> [Str] []
+    todo("tera-nv.teraparse.variables")
+
+// filters_used is every filter name the template applies.
+//
+// So that a caller extending the registry can check, before rendering,
+// that it registered everything the templates ask for — rather than
+// finding out on the one page that uses `markdown`.
+pub fn filters_used(t: TeraTemplate) -> [Str] []
+    todo("tera-nv.teraparse.filters_used")
+
+// set_new is an empty set with the default autoescape rule.
+pub fn set_new() -> TeraSet []
+    todo("tera-nv.teraparse.set_new")
+
+// set_with is an empty set with an autoescape rule of the caller's
+// choosing.
+pub fn set_with(escape: TeraEscape) -> TeraSet []
+    todo("tera-nv.teraparse.set_with")
+
+// set_add parses a template and adds it under a name.
+//
+// A name already present is replaced, which is what a watching dev
+// server does when a file changes.
+pub fn set_add(s: TeraSet, name: Str, source: Str) -> Result<TeraSet, teraerror.TeraError> []
+    todo("tera-nv.teraparse.set_add")
+
+// set_add_parsed adds a template that is already parsed.
+//
+// For a caller that parsed once and is building several sets, and for
+// one that compiled its templates at build time.
+pub fn set_add_parsed(s: TeraSet, t: TeraTemplate) -> TeraSet []
+    todo("tera-nv.teraparse.set_add_parsed")
+
+// set_names is every name the set holds.
+pub fn set_names(s: TeraSet) -> [Str] []
+    todo("tera-nv.teraparse.set_names")
+
+// set_get is a template by name.
+pub fn set_get(s: TeraSet, name: Str) -> ?TeraTemplate []
+    todo("tera-nv.teraparse.set_get")
+
+// set_missing is every name the set's templates reference and the set
+// does not hold.
+//
+// **The load-bearing interface.**  `core` cannot read a file, so this
+// is how a template that extends another gets it: the core says what
+// it needs, the host reads it, and the loop runs until nothing is
+// missing.
+//
+// ```novo ignore
+// var set = teraparse.set_new()
+// set = add(set, "page.html", read("page.html"))
+// var missing = teraparse.set_missing(set)
+// while list.len(missing) > 0
+//     for name in missing
+//         set = add(set, name, read(name))       // the host reads
+//     missing = teraparse.set_missing(set)
+// ```
+//
+// Only the literal references — see `references`.  A set with nothing
+// missing can still fail to render with `ErrorTemplateNotFound` if a
+// template computes an include name, and the error carries the name so
+// the host loop can handle that case the same way.
+pub fn set_missing(s: TeraSet) -> [Str] []
+    todo("tera-nv.teraparse.set_missing")
+
+// set_check answers every problem a set has that does not need a
+// context to find.
+//
+// A cycle in `{% extends %}`, a block a child overrides that no parent
+// defines, a template that extends one the set does not hold.  For a
+// build-time check: a site generator that ran this once would catch
+// the typo in `{% block contnet %}` at build time instead of shipping
+// a page with a hole in it.
+pub fn set_check(s: TeraSet) -> [teraerror.TeraError] []
+    todo("tera-nv.teraparse.set_check")
+
+// set_sources is every template's name and text, for
+// `teraerror.report`.
+pub fn set_sources(s: TeraSet) -> [teraerror.TeraSource] []
+    todo("tera-nv.teraparse.set_sources")
+
+// escapes_name answers whether a template of this name is autoescaped
+// under a set's rule.
+//
+// Published because a caller wants to be able to check, and because
+// "why is my `.txt` output full of `&amp;`" is a question with one
+// answer and it should be askable.
+pub fn escapes_name(s: TeraSet, name: Str) -> Bool []
+    todo("tera-nv.teraparse.escapes_name")

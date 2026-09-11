@@ -1,0 +1,322 @@
+// terarender_tests.nv — the API suite for the language and the
+// renderer.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: tera-nv.<fn>`.
+//
+// THE CASES ARE TERA's AND JINJA2's OWN.  Each one below is a
+// construct from Tera's documentation or from the Jinja2 template
+// designer documentation, written as the template and the output it
+// must produce, and the two suites those projects ship become
+// generated runs beside this one when the implementation lands.
+//
+// THE AUTOESCAPE TESTS COME FIRST because they are the ones that are
+// a security property rather than a feature.
+
+use std.test
+use std.list
+use teraval
+use teraparse
+use terafilter
+use terarender
+use teraerror
+
+fn render(source: Str, ctx: teraval.TeraContext) -> Str [io]
+    match terarender.render_one(source, ctx)
+        Err(_) =>
+            todo("terarender_tests.render — the template did not render")
+        Ok(s)  =>
+            s
+
+fn ctx1(name: Str, v: teraval.TeraValue) -> teraval.TeraContext [io]
+    teraval.context_insert(teraval.context_new(), name, v)
+
+@test
+fn test_autoescape_is_on_and_is_html_nv_s_escape() [io]
+    // A template engine for the web whose default is not to escape is
+    // a template engine that produces cross-site scripting.
+    let c = ctx1("x", ValueStr("<script>alert(1)</script>"))
+
+    test.case("a value in an html template is escaped")
+    let out = render("<p>{{ x }}</p>", c)
+    test.assert(str.contains(out, "<script>") == false)
+    test.assert(str.contains(out, "&lt;script&gt;"))
+
+    test.case("and the escape is the attribute one — five characters, everywhere")
+    test.assert(terarender.escape("a\"b'c<d") == "a&quot;b&#39;c&lt;d")
+
+    test.case("escaping more than necessary is unnoticed; escaping less is a hole")
+    test.assert(str.contains(render("<a title=\"{{ x }}\">t</a>",
+                                    ctx1("x", ValueStr("a\"b"))),
+                                    "&quot;"))
+
+@test
+fn test_safe_is_the_whole_escape_hatch_and_it_is_greppable() [io]
+    let c = ctx1("x", ValueStr("<b>bold</b>"))
+
+    test.case("the safe filter turns escaping off for one value")
+    test.assert(render("{{ x | safe }}", c) == "<b>bold</b>")
+
+    test.case("and for that value only — the next one is still escaped")
+    let out = render("{{ x | safe }}{{ x }}", c)
+    test.assert(str.contains(out, "<b>bold</b>"))
+    test.assert(str.contains(out, "&lt;b&gt;"))
+
+    test.case("a renderer of untrusted templates removes it in one line")
+    let without = terafilter.without_filter(terafilter.builtin_filters(), "safe")
+    test.assert(terafilter.get(without, "safe") == None)
+
+@test
+fn test_the_escape_rule_is_decided_by_the_template_s_name() [io]
+    // Tera's own rule, and the default, because it gets a site
+    // generator's `.html` layouts and its `.txt` mail templates both
+    // right with no configuration.
+    let set = teraparse.set_new()
+
+    test.case("an html template is escaped")
+    test.assert(teraparse.escapes_name(set, "page.html"))
+    test.assert(teraparse.escapes_name(set, "feed.xml"))
+
+    test.case("a text one is not — escaping it would corrupt the output")
+    test.assert(teraparse.escapes_name(set, "mail.txt") == false)
+    test.assert(teraparse.escapes_name(set, "config.toml") == false)
+
+    test.case("EscapeAlways and EscapeNever override the suffix")
+    test.assert(teraparse.escapes_name(teraparse.set_with(EscapeAlways), "a.txt"))
+    test.assert(teraparse.escapes_name(teraparse.set_with(EscapeNever),
+                                       "a.html") == false)
+
+@test
+fn test_the_expression_forms_are_the_ones_a_page_needs() [io]
+    test.case("a variable")
+    test.assert(render("{{ x }}", ctx1("x", ValueStr("a"))) == "a")
+
+    test.case("a dotted path")
+    let user = ValueMap([TeraPair { key: "name", value: ValueStr("n") }])
+    test.assert(render("{{ u.name }}", ctx1("u", user)) == "n")
+
+    test.case("an index into a list")
+    let xs = ValueList([ValueInt(1), ValueInt(2)])
+    test.assert(render("{{ xs.1 }}", ctx1("xs", xs)) == "2")
+
+    test.case("an int renders without a decimal point and a float with one")
+    test.assert(render("{{ n }}", ctx1("n", ValueInt(3))) == "3")
+    test.assert(render("{{ n }}", ctx1("n", ValueFloat(3.5))) == "3.5")
+
+    test.case("null renders as nothing")
+    test.assert(render("[{{ n }}]", ctx1("n", ValueNull)) == "[]")
+
+@test
+fn test_if_and_the_truthiness_rule_are_jinja2_s() [io]
+    test.case("the branches")
+    test.assert(render("{% if x %}y{% else %}n{% endif %}",
+                       ctx1("x", ValueBool(true))) == "y")
+    test.assert(render("{% if x %}y{% else %}n{% endif %}",
+                       ctx1("x", ValueBool(false))) == "n")
+
+    test.case("elif")
+    test.assert(render("{% if n == 1 %}a{% elif n == 2 %}b{% else %}c{% endif %}",
+                       ctx1("n", ValueInt(2))) == "b")
+
+    test.case("the truthiness rule, which is published because a filter must agree")
+    test.assert(teraval.is_truthy(ValueNull) == false)
+    test.assert(teraval.is_truthy(ValueInt(0)) == false)
+    test.assert(teraval.is_truthy(ValueStr("")) == false)
+    test.assert(teraval.is_truthy(ValueList([])) == false)
+    test.assert(teraval.is_truthy(ValueStr("a")))
+    test.assert(teraval.is_truthy(ValueInt(1)))
+
+    test.case("an int literal compares equal to a float value, which JSON makes common")
+    test.assert(teraval.equals(ValueInt(1), ValueFloat(1.0)))
+
+@test
+fn test_for_carries_the_loop_variables_and_an_else_for_the_empty_case() [io]
+    let xs = ValueList([ValueStr("a"), ValueStr("b")])
+
+    test.case("the body runs once per item")
+    test.assert(render("{% for x in xs %}{{ x }}{% endfor %}", ctx1("xs", xs))
+                == "ab")
+
+    test.case("loop.index is 1-based and loop.index0 is not")
+    test.assert(render("{% for x in xs %}{{ loop.index }}{% endfor %}",
+                       ctx1("xs", xs)) == "12")
+    test.assert(render("{% for x in xs %}{{ loop.index0 }}{% endfor %}",
+                       ctx1("xs", xs)) == "01")
+
+    test.case("loop.first and loop.last are what a separator needs")
+    test.assert(render("{% for x in xs %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %}",
+                       ctx1("xs", xs)) == "a,b")
+
+    test.case("an empty list takes the else branch")
+    test.assert(render("{% for x in xs %}a{% else %}none{% endfor %}",
+                       ctx1("xs", ValueList([]))) == "none")
+
+    test.case("a map iterates in insertion order, so two builds diff cleanly")
+    let m = ValueMap([TeraPair { key: "b", value: ValueInt(1) },
+                      TeraPair { key: "a", value: ValueInt(2) }])
+    test.assert(render("{% for k, v in m %}{{ k }}{% endfor %}", ctx1("m", m))
+                == "ba")
+
+    test.case("and the loop names are published so a build-time check can skip them")
+    test.assert(list.len(terarender.loop_variable_names()) == 5)
+
+@test
+fn test_set_raw_and_comments() [io]
+    test.case("set binds a name for the rest of the template")
+    test.assert(render("{% set n = 2 %}{{ n }}", teraval.context_new()) == "2")
+
+    test.case("raw emits its contents without looking at them")
+    test.assert(render("{% raw %}{{ x }}{% endraw %}", teraval.context_new())
+                == "{{ x }}")
+
+    test.case("a comment emits nothing")
+    test.assert(render("a{# note #}b", teraval.context_new()) == "ab")
+
+@test
+fn test_the_filter_pipeline_is_how_the_language_stays_small() [io]
+    test.case("a chain applies left to right")
+    test.assert(render("{{ x | trim | upper }}", ctx1("x", ValueStr("  a  ")))
+                == "A")
+
+    test.case("a filter takes arguments")
+    test.assert(render("{{ x | truncate(3) }}", ctx1("x", ValueStr("abcdef")))
+                == "abc")
+
+    test.case("default is what a template writes instead of an if around every field")
+    test.assert(render("{{ x | default(\"-\") }}", ctx1("x", ValueNull)) == "-")
+
+    test.case("length works on a string, a list and a map")
+    test.assert(render("{{ x | length }}", ctx1("x", ValueStr("abc"))) == "3")
+    test.assert(render("{{ x | length }}",
+                       ctx1("x", ValueList([ValueInt(1)]))) == "1")
+
+    test.case("join is the other half of what a separator needs")
+    let xs = ValueList([ValueStr("a"), ValueStr("b")])
+    test.assert(render("{{ xs | join(\", \") }}", ctx1("xs", xs)) == "a, b")
+
+@test
+fn test_the_registry_is_a_value_the_caller_extends_and_overrides() [io]
+    let base = terafilter.builtin_filters()
+
+    test.case("the builtins are there and can be enumerated")
+    test.assert(list.len(terafilter.filter_names(base)) > 20)
+    test.assert(terafilter.get(base, "upper") != None)
+    test.assert(terafilter.get(base, "markdown") == None)
+
+    test.case("a caller adds one")
+    let plus = terafilter.with_filter(base, terafilter.filter("shout", shout))
+    test.assert(terafilter.get(plus, "shout") != None)
+
+    test.case("and overriding a builtin replaces it rather than shadowing it")
+    let over = terafilter.with_filter(base, terafilter.filter("upper", shout))
+    test.assert(list.len(terafilter.filter_names(over))
+                == list.len(terafilter.filter_names(base)))
+
+    test.case("tests are a different namespace from filters, on purpose")
+    let ts = terafilter.builtin_tests()
+    test.assert(list.len(terafilter.test_names(ts)) > 5)
+    test.assert(render("{% if x is defined %}y{% else %}n{% endif %}",
+                       ctx1("x", ValueInt(1))) == "y")
+
+    test.case("and a caller adds a test the same way it adds a filter")
+    let plus_test = terafilter.with_test(ts, TeraTest { name: "loud",
+                                                        check: is_loud })
+    test.assert(list.len(terafilter.test_names(plus_test))
+                == list.len(terafilter.test_names(ts)) + 1)
+
+    test.case("an empty registry is what a multi-tenant renderer starts from")
+    test.assert(list.len(terafilter.filter_names(terafilter.no_filters())) == 0)
+
+    test.case("and every filter's refusal is built the same way, so they read alike")
+    let e = terafilter.refuse("upper", "a string", ValueList([]))
+    test.assert(str.contains(teraerror.one_line(e), "upper"))
+
+fn is_loud(v: teraval.TeraValue, args: [teraval.TeraValue]) -> Result<Bool, TeraError>
+    Ok(str.upper(teraval.to_display(v)) == teraval.to_display(v))
+
+fn shout(v: teraval.TeraValue, args: [teraval.TeraValue]) -> Result<teraval.TeraValue, TeraError>
+    Ok(ValueStr(str.upper(teraval.to_display(v))))
+
+@test
+fn test_a_render_is_bounded_because_a_template_can_be_a_stranger_s() [io]
+    test.case("the default bounds are ones no real template reaches")
+    let l = teraparse.default_limits()
+    test.assert(l.max_depth == 32)
+    test.assert(l.max_iterations > 0)
+    test.assert(l.max_output > 0)
+
+    test.case("and there is no while loop in the language at all")
+    match teraparse.parse("t.html", "{% while x %}a{% endwhile %}")
+        Ok(_)  =>
+            test.assert(false)
+        Err(_) =>
+            test.assert(true)
+
+@test
+fn test_a_render_reports_which_templates_it_used() [io]
+    // What an incremental site generator needs: "this page depends on
+    // these templates" is what decides whether to re-render it.
+    match teraparse.set_add(teraparse.set_new(), "p.html", "<p>{{ x }}</p>")
+        Err(_)  =>
+            test.assert(false)
+        Ok(set) =>
+            match terarender.render([], set, "p.html", ctx1("x", ValueStr("a")),
+                                    terafilter.builtin_filters(),
+                                    terafilter.builtin_tests())
+                Err(_) =>
+                    test.assert(false)
+                Ok(r)  =>
+                    test.case("the dependency edge is reported")
+                    test.assert(list.len(r.used) == 1)
+                    test.case("and so is the iteration count, before it trips")
+                    test.assert(r.iterations == 0)
+
+@test
+fn test_the_four_other_ways_in_are_the_same_render() [io]
+    // A convenience that disagreed with the function it wraps would be
+    // a second engine.
+    let set = teraparse.set_add_parsed(teraparse.set_new(), parsed("p.html",
+                                                                   "<h1>{{ t }}</h1>"))
+    let ctx = ctx1("t", ValueStr("Home"))
+
+    test.case("set_names sees what set_add_parsed put there")
+    test.assert(list.len(teraparse.set_names(set)) == 1)
+
+    test.case("render_str is render into a fresh string")
+    match terarender.render_str(set, "p.html", ctx)
+        Err(_) =>
+            test.assert(false)
+        Ok(s)  =>
+            test.assert(s == "<h1>Home</h1>")
+
+    test.case("render_with is render under the caller's bounds")
+    let tight = TeraLimits { max_depth: 1, max_iterations: 4, max_output: 16 }
+    match terarender.render_with([], set, "p.html", ctx,
+                                 terafilter.builtin_filters(),
+                                 terafilter.builtin_tests(), tight)
+        Err(_) =>
+            test.assert(false)
+        Ok(r)  =>
+            test.assert(list.len(r.out) > 0)
+
+    test.case("render_block is one block of a page, in the page's own context")
+    let blocks = teraparse.set_add_parsed(teraparse.set_new(),
+                                          parsed("b.html",
+                                                 "{% block main %}{{ t }}{% endblock %}"))
+    match terarender.render_block([], blocks, "b.html", "main", ctx,
+                                  terafilter.builtin_filters(),
+                                  terafilter.builtin_tests())
+        Err(_) =>
+            test.assert(false)
+        Ok(r)  =>
+            test.assert(list.len(r.out) == 4)
+
+    test.case("and the escape appends as well as returning")
+    test.assert(list.len(terarender.escape_into([], "<")) == 4)
+
+fn parsed(name: Str, source: Str) -> teraparse.TeraTemplate [io]
+    match teraparse.parse(name, source)
+        Err(_) =>
+            todo("terarender_tests.parsed — the template did not parse")
+        Ok(t)  =>
+            t

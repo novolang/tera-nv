@@ -1,0 +1,165 @@
+// teraval.nv — the values a template sees, and the context that holds
+// them.
+//
+// Every body here is a `todo()`; the signatures are the design.
+
+use teraerror
+
+// A TEMPLATE ENGINE NEEDS A DYNAMIC VALUE, and there is no way round
+// it: `{{ user.name }}` is a field access decided when the template
+// runs, against a value the template has never been type-checked
+// against.  So `TeraValue` is the JSON shape — null, bool, int, float,
+// string, list, map — and that is deliberately the same shape
+// serde-nv and std.json already speak, so that a program that has
+// deserialised something can render it without a second conversion.
+//
+// INT AND FLOAT ARE SEPARATE, and that is the one place this differs
+// from JSON's number.  `{{ count }}` rendering `3` rather than `3.0`
+// is the difference between a page a reader trusts and one they do
+// not, and an engine that could not tell the two apart would have to
+// guess from the digits.
+//
+// THE CONTEXT IS A VALUE, NOT A BUILDER.  `context_insert` returns a
+// new context, so a caller can build a base context once and add a
+// page's own variables per page without the two interfering — which
+// is exactly what a site generator rendering 58 pages does.
+//
+// THERE IS NO WAY TO PUT A FUNCTION IN A CONTEXT, on purpose.  A
+// template that can call arbitrary code is a template that is a
+// program, and the whole reason to put logic in a filter registry
+// instead is that the registry is a thing the caller enumerated.
+
+// TeraValue is what a template can see.
+pub enum TeraValue
+    // Absent.  `{{ x }}` where `x` is null renders as empty, and
+    // `{% if x %}` is false — which is Jinja2's rule and the one every
+    // template author expects.
+    ValueNull
+    ValueBool(v: Bool)
+    ValueInt(v: Int)
+    ValueFloat(v: Float)
+    ValueStr(v: Str)
+    ValueList(items: [TeraValue])
+    // A map, as pairs in insertion order.  Pairs rather than a hash
+    // because `{% for k, v in map %}` has to iterate in an order that
+    // does not change between two renders of the same data — a page
+    // whose nav reorders itself on every build is a page whose diff is
+    // useless.
+    ValueMap(pairs: [TeraPair])
+
+// TeraPair is one entry of a map.
+pub struct TeraPair
+    key: Str
+    value: TeraValue
+
+// TeraContext is the variables a render starts with.
+pub struct TeraContext
+    pairs: [TeraPair]
+
+// context_new is an empty context.
+//
+// ```novo
+// use teraval
+//
+// fn main() [io]
+//     let ctx = teraval.context_insert(teraval.context_new(),
+//                                      "title", ValueStr("Home"))
+//     println(teraval.to_display(teraval.context_get(ctx, "title") ?? ValueNull))
+// ```
+pub fn context_new() -> TeraContext []
+    todo("tera-nv.teraval.context_new")
+
+// context_insert is the context with one more variable.
+//
+// A new context rather than a mutation, so a base context can be built
+// once and added to per page.  A name already present is REPLACED, and
+// the new value takes the old one's position — so a caller that
+// overrides a default does not also reorder the map.
+pub fn context_insert(ctx: TeraContext, name: Str, value: TeraValue) -> TeraContext []
+    todo("tera-nv.teraval.context_insert")
+
+// context_get is a variable's value, or `None`.
+pub fn context_get(ctx: TeraContext, name: Str) -> ?TeraValue []
+    todo("tera-nv.teraval.context_get")
+
+// context_names is every variable name, in insertion order.
+//
+// For a diagnostic: "unknown variable `titl`" is much more useful when
+// the engine can also say what there was.
+pub fn context_names(ctx: TeraContext) -> [Str] []
+    todo("tera-nv.teraval.context_names")
+
+// context_from_map is a context out of a map value.
+//
+// The bridge from a deserialised value: a caller that parsed JSON into
+// a `TeraValue` renders with it directly.  `None` for a value that is
+// not a map, because a template's context is named variables and a
+// list has no names.
+pub fn context_from_map(v: TeraValue) -> ?TeraContext []
+    todo("tera-nv.teraval.context_from_map")
+
+// lookup resolves a dotted path against a value.
+//
+// `user.address.city`, and `items.0` for a list index — the same
+// syntax a template writes, in one function, so that a filter that
+// wants to resolve a path does it the way the renderer does.
+//
+// `Err` rather than `None` because the two failures are different
+// answers a caller needs to tell apart: a field that does not exist is
+// `ErrorNoSuchField`, and indexing a string is `ErrorFilterRefused`.
+pub fn lookup(v: TeraValue, path: Str) -> Result<TeraValue, teraerror.TeraError> []
+    todo("tera-nv.teraval.lookup")
+
+// is_truthy is what `{% if %}` decides on.
+//
+// Jinja2's rule, which is the one every template author already knows:
+// null is false, false is false, 0 and 0.0 are false, the empty string
+// is false, an empty list or map is false, and everything else is
+// true.  Published because a filter that branches has to agree with
+// the renderer, and because an author debugging an `{% if %}` needs
+// the rule written down somewhere.
+pub fn is_truthy(v: TeraValue) -> Bool []
+    todo("tera-nv.teraval.is_truthy")
+
+// to_display is how a value renders inside `{{ }}`.
+//
+// A string renders as itself, an int as its digits, a float as the
+// shortest form that round-trips, a bool as `true` or `false`, null as
+// empty.  A list or a map renders as its JSON — which is not usually
+// what an author meant, and is much better than an empty string,
+// because the page then shows what went wrong instead of hiding it.
+pub fn to_display(v: TeraValue) -> Str []
+    todo("tera-nv.teraval.to_display")
+
+// to_json is a value as JSON text.
+//
+// What the `json_encode` filter is, and what a caller embedding data
+// in a `<script type="application/json">` needs.
+pub fn to_json(v: TeraValue) -> Str []
+    todo("tera-nv.teraval.to_json")
+
+// type_name is `"null"`, `"bool"`, `"int"`, `"float"`, `"string"`,
+// `"list"` or `"map"`.
+//
+// For an error message: "filter `upper` wanted a string, got a list"
+// is the message, and this is where the last two words come from.
+pub fn type_name(v: TeraValue) -> Str []
+    todo("tera-nv.teraval.type_name")
+
+// equals is value equality, used by `{% if a == b %}`.
+//
+// An int and a float compare equal when they are the same number —
+// `1 == 1.0` — because a template author who wrote a literal `1`
+// against a value that came out of JSON as a float should not have to
+// know that.  Two maps compare equal when they hold the same pairs,
+// whatever order they are in; two lists only in the same order.
+pub fn equals(a: TeraValue, b: TeraValue) -> Bool []
+    todo("tera-nv.teraval.equals")
+
+// compare orders two values for `<`, `<=`, `>` and `>=`.
+//
+// Negative, zero or positive.  Numbers compare as numbers and strings
+// as bytes; comparing values of different kinds is not an ordering
+// question, and `None` is how this says so rather than inventing one.
+pub fn compare(a: TeraValue, b: TeraValue) -> ?Int []
+    todo("tera-nv.teraval.compare")
