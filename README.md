@@ -1,318 +1,300 @@
 # tera-nv
 
-**Status: NOT IMPLEMENTED — interface only.**
+A **template** is a document with holes in it: text, plus places where
+a value is substituted and places where a section repeats or is
+omitted. [Tera](https://keats.github.io/tera/) is a template language
+for Rust, closely modelled on Python's
+[Jinja2](https://jinja.palletsprojects.com/). This package implements
+that language in novo-lang, with the filesystem taken out of it: a
+template is parsed once from text the caller supplies and rendered many
+times. Its escaping is
+[html-nv](https://novo-lang.org/packages/html-nv)'s.
 
-Every public function below is published with its signature and its
-effect row, and every body is `todo()`. Installing this package works;
-calling it panics with `not implemented`.
+**Status: NOT IMPLEMENTED — interface only.** Every function is
+declared with its full signature, but every body is a `todo()` that
+panics when called. The package is published so its design can be
+reviewed and depended on before it is implemented. Version 0.1.0 will
+be the first working release.
 
-## What this is
+## What the language is
 
-The Tera and Jinja2 template language, with the filesystem taken out of
-it.
+`{{ title }}` is an **expression**: the value of `title`, rendered into
+the output. A path with dots reaches into a value, so
+`{{ user.name }}` reads the `name` entry of `user`.
 
-- `teraval` — the values a template sees, and the context;
-- `teraparse` — a template parsed once, and a **set** of them;
-- `terarender` — a template and a context into bytes the caller owns;
-- `terafilter` — filters and tests, as registries the caller extends;
-- `teraerror` — what went wrong, where, and through which include.
+`{% if %}`, `{% elif %}`, `{% else %}` and `{% endif %}` include a
+section conditionally. `{% for x in items %}` repeats one, and inside
+it `loop.index`, `loop.first` and `loop.last` describe the position. A
+`{% for %}` may carry an `{% else %}` for the case where the collection
+is empty. `{% set %}` names a value for the rest of the template.
+`{# ... #}` is a comment.
+
+A **filter** transforms a value, written `{{ title | upper }}`. Filters
+take arguments. A **test** asks a question, written
+`{% if x is defined %}`. Both are **registries**: a named set of
+functions the caller can add to or remove from.
+
+**Inheritance** is how one template reuses another's structure. A
+parent defines named holes with `{% block name %}`. A child says
+`{% extends "base.html" %}` and fills them with its own
+`{% block name %}`. `{{ super() }}` inside a child's block renders the
+parent's version of it. `{% include "header.html" %}` renders another
+template in place.
+
+**Autoescaping** means that a substituted value has its HTML
+metacharacters replaced, so a value containing `<script>` appears on
+the page as text rather than running. It is on by default here, chosen
+by the template's name, and `{{ x | safe }}` turns it off for one
+value.
+
+A **template set** is this package's whole loading model. It holds
+templates by name, in memory. `extends` and `include` resolve inside
+it, and the caller fills it: this package declares no effects and opens
+no file.
+
+## Install
 
 ```
 novo pkg add tera-nv
-novo pkg build
-novo test
 ```
 
-## The one example that will work — the host loop
+## Example
 
-```novo ignore
+```novo
+use teraerror
 use teraparse
 use terarender
+use teraval
 
-// `core` cannot open a file.  So the core says what it needs and the
-// host reads it — which is the whole of how `{% extends %}` works
-// here, and the reason this package has a layer at all.
-fn load_all(names: [Str], read: fn(Str) -> Str) -> teraparse.TeraSet [fs]
-    var set = teraparse.set_new()
-    for name in names
-        set = add(set, name, read(name))
+fn main() [io]
+    // A set of templates, held by name. This package never opens a file.
+    match teraparse.set_add(teraparse.set_new(), "page.html",
+                            "<h1>{{ title }}</h1>")
+        Err(e) => println(teraerror.one_line(e))
+        Ok(set) =>
+            // Every name the set's templates reference and it does not
+            // hold. The caller reads those and adds them.
+            for name in teraparse.set_missing(set)
+                println("still needed: ${name}")
 
-    var missing = teraparse.set_missing(set)
-    while list.len(missing) > 0
-        for name in missing
-            set = add(set, name, read(name))     // the host performs
-        missing = teraparse.set_missing(set)
-    set
+            // The values the template sees.
+            let ctx = teraval.context_insert(teraval.context_new(),
+                                             "title", ValueStr("Hello & welcome"))
+
+            // Render. The name ends in `.html`, so `{{ title }}` is
+            // escaped and the ampersand comes out as `&amp;`.
+            match terarender.render_str(set, "page.html", ctx)
+                Ok(html) => println(html)
+                Err(e)   => println(teraerror.report(e, teraparse.set_sources(set)))
 ```
 
-## The load-bearing interface
+Build and test with `novo pkg build` and `novo test`. Today `novo test`
+fails on purpose: every test reaches a
+`not implemented: tera-nv.<module>.<fn>` panic. The tests are the
+specification the implementation will have to satisfy.
 
-```novo ignore
-pub fn set_missing(s: TeraSet) -> [Str] []
-pub fn missing(e: TeraError) -> ?Str []
-```
+## What the package contains
 
-**A template that inherits needs another template, and a `core`
-package cannot open a file.** `TeraSet` holds templates by name, in
-memory; `set_missing` reports every name the set's templates reference
-and it does not hold; the host reads those and adds them; repeat.
-That is the shape the layer design asks of a `core` package — it takes
-values in and returns requested actions out, and the host is the only
-party that performs anything.
-
-It is also why a template set can come out of a zip archive, a
-database, an HTTP response or a compiled-in constant with no change to
-this package.
-
-**`terarender.missing` is the other half, and it exists because
-`set_missing` cannot be complete.** `{% include name_var %}` computes
-its name at render time, so it cannot be reported before the render.
-Rather than promising completeness this package does not have, the
-render's error carries the name the host has to read, and the host
-handles it with the same loop. Saying so is better than a promise that
-quietly does not hold.
-
-## Autoescaping, which is a security property rather than a feature
-
-**On by default, and it is html-nv's escape.** A template engine for
-the web whose default is not to escape produces cross-site scripting;
-one whose escape disagrees with the HTML package the same program uses
-produces a page with two escaping rules in it.
-
-`{{ x }}` in an autoescaped template is `htmlsafe.escape_attr` — five
-characters, `& < > " '` — **everywhere**, including outside attributes
-where three would do. A template engine cannot tell whether a `{{ }}`
-is inside an attribute, and escaping more than necessary is a rendering
-nobody notices while escaping less is a hole.
-
-`{{ x | safe }}` turns it off for one value. That is the whole escape
-hatch, it is at the point it is needed, and it is greppable. A caller
-rendering templates it does not trust removes it in one line:
-`terafilter.without_filter(builtin_filters(), "safe")`.
-
-**Which templates are escaped is decided by name** — `.html`, `.htm`,
-`.xml`, `.xhtml` are, everything else is not. That is Tera's own rule
-and it gets a site generator's `.html` layouts and its `.txt` mail
-templates both right with no configuration. `EscapeAlways` and
-`EscapeNever` are the named overrides.
-
-## What the site generator's engine does, and what it does not
-
-The plan's row says *the site generator's template engine graduates*.
-It is worth being exact about what that is, because it is smaller than
-the word "engine" suggests.
-
-`orbit/static-site-generator/src/main.nv` has two functions —
-`render_template` and `expand_includes`, about forty lines between
-them:
-
-```novo ignore
-fn render_template(tpl: Str, content: Str, title: Str, sidebar: Str,
-                   theme_dir: Str) -> Str [io, fs]
-    var out = tpl
-    out = replace_all(out, "{{ content }}", content)
-    out = replace_all(out, "{{ title }}",   title)
-    out = replace_all(out, "{{ sidebar }}", sidebar)
-    out = expand_includes(out, theme_dir)
-    out
-```
-
-Three named substitutions and `{{ include "path" }}`, expanded in a
-loop with a budget of 16.
-
-**What it does that this package must not lose:**
-
-- **The include budget.** Sixteen expansions, then it stops. A template
-  that includes itself terminates. `TeraLimits.max_depth` is the same
-  idea, given a name and a reported error instead of a silent stop.
-- **A missing include is a warning and an empty expansion**, not a
-  failure — the build carries on and says so. That is the right
-  behaviour for a dev server, and it is reachable here by catching
-  `ErrorTemplateNotFound` and continuing; it is not the default,
-  because a production build that silently dropped a header is worse
-  than one that failed.
-
-**What it does not do, and this package does:**
-
-| the generator | here |
+| Module | Contents |
 | --- | --- |
-| three hard-coded variable names | any name, and dotted paths into a value |
-| no conditionals | `{% if %}` / `{% elif %}` / `{% else %}` |
-| no loops — the sidebar is built by Novo code that concatenates strings | `{% for %}`, with `loop.index`, `loop.first`, `loop.last` and an `{% else %}` for the empty case |
-| no inheritance — every layout is a whole file | `{% extends %}`, `{% block %}`, `{{ super() }}` |
-| no filters | a registry of about thirty, which the caller extends |
-| no escaping at all | autoescape on, by template name |
-| `[io, fs]` — it reads the include from disk as it expands | `[]`; the host reads and `set_missing` says what |
-| a missing include prints a warning to stdout | an error value with a template, a line and a chain |
-| substitution by `replace_all`, so `{{ content }}` inside the content expands again | parsed once; content is content |
+| `teraerror` | What went wrong, where in which template, and the chain of includes and blocks that reached it. |
+| `teraval` | The values a template sees, the context, and the lookup, truthiness and comparison rules. |
+| `teraparse` | A template parsed once, the set of them, the escaping rule and the render limits. |
+| `terafilter` | The filter and test registries, and the builders for adding to them. |
+| `terarender` | Rendering a template into a buffer the caller owns, and the escape the renderer uses. |
 
-That last row is a real bug rather than a missing feature: the
-generator substitutes into a string and then substitutes again, so a
-page whose body contains the literal text `{{ title }}` — a page
-documenting this template syntax, for instance — has it replaced. A
-parsed template cannot do that.
+## How to choose an entry point
 
-**What happens to the generator's engine.** It is deleted when this
-package has bodies, and the migration is small because the generator's
-own Novo code is doing the work a template language would: `build_sidebar`
-is a `{% for %}`, `build_page_toc` is a nested one, and `render_page`'s
-argument list is a context. The sequence is the same one markdown-nv
-describes: the site generator moves first, then `orbit/website`'s
-pages, and the two packages land together because the generator wants
-both.
+**`teraparse.set_add` and `terarender.render_str` are the ordinary
+path.** Build the set once, render many times.
 
-## The dependency, and the one it does not have
+**`terarender.render` appends to a buffer the caller owns** and
+`render_with` takes the filter and test registries and the limits.
+`render_block` renders one block of one template, which is what an
+endpoint answering a fragment wants.
 
-**html-nv, for autoescaping and for nothing else.** The argument is
-above: one escape, used by both packages, or two rules in one page.
-`terarender.escape` republishes it so that a caller writing a filter
-which produces markup escapes exactly the way the renderer would.
+**`terarender.render_one` renders a template with no set at all**, for
+a template with no `extends` and no `include`.
 
-What this package does **not** take from html-nv: the parser, the tree,
-the selectors, the sanitiser. A template engine does not parse its own
-output.
+**`teraparse.set_check` runs at build time.** It finds a block a child
+overrides that no parent defines, an `extends` cycle and a missing
+parent, before anything is rendered.
 
-**markdown-nv is not a dependency**, and there is no `markdown` filter.
-A `web` package depending on a `text` package to provide a filter most
-callers will not use is the wrong direction, and the registry is a
-value — a caller that wants it writes three lines:
+**`teraparse.set_missing` drives loading.** See rule 1.
 
-```novo ignore
-let filters = terafilter.with_filter(terafilter.builtin_filters(),
-                                     terafilter.filter("markdown", to_html))
-```
+## The rules a user needs
 
-The same argument covers `date` (calendar-nv's arithmetic) and
-anything that would read, fetch or consult a clock (`core`).
+1. **Loading is a loop between this package and the caller.** Add what
+   you have with `set_add`, ask `set_missing` for every name the set's
+   templates reference and do not hold, read those, add them, and ask
+   again. A set can therefore come from a directory, a zip archive, a
+   database, an HTTP response or a compiled-in constant with no change
+   here.
+2. **`set_missing` cannot be complete, and `terarender.missing` is the
+   other half.** `{% include name_var %}` computes its name during the
+   render, so it cannot be reported before one. The render's error
+   carries the name, and the caller reads it and renders again.
+3. **Autoescaping is on, and it is decided by the template's name.**
+   `.html`, `.htm`, `.xml` and `.xhtml` are escaped and everything else
+   is not, which is Tera's own rule. It gets a site generator's `.html`
+   layouts and its `.txt` mail templates both right with no
+   configuration. `EscapeAlways` and `EscapeNever` are the named
+   overrides.
+4. **The escape is html-nv's `escape_attr`, everywhere.** It replaces
+   five characters: `&`, `<`, `>`, `"` and `'`. A template engine
+   cannot tell whether a `{{ }}` sits inside an attribute, and escaping
+   more than necessary is a rendering nobody notices while escaping
+   less is a hole. `terarender.escape` republishes it, so a caller
+   writing a filter that produces markup escapes the way the renderer
+   does.
+5. **`| safe` is the whole escape hatch.** It is at the point where it
+   is needed and it can be searched for. A caller rendering templates
+   it does not trust removes it:
+   `terafilter.without_filter(builtin_filters(), "safe")`.
+6. **A null value renders as empty and is false.** That is Jinja2's
+   rule and what a template author expects.
+   `teraval.is_truthy` is the whole predicate.
+7. **A map iterates in insertion order.** `ValueMap` holds pairs rather
+   than a hash, because a page whose navigation reorders itself between
+   two renders of the same data has a diff nobody can read.
+8. **Three limits bound a render.** They are checked during it, not
+   after.
 
-## The language, and what is deliberately not in it
+   | `TeraLimits` field | What it bounds | `default_limits()` |
+   | --- | --- | --- |
+   | `max_depth` | How deeply includes and extends nest | 32 |
+   | `max_iterations` | Loop iterations in one render | 10,000,000 |
+   | `max_output` | Bytes one render may produce | 64 MiB |
 
-**In:** `{{ }}` with dotted paths and indices; filters with arguments;
-`{% if %}` / `{% elif %}` / `{% else %}`; `{% for %}` with `{% else %}`
-and the `loop` variables; `{% set %}`; `{% include %}`;
-`{% extends %}`, `{% block %}` and `{{ super() }}`; `{% macro %}` and
-`{% import %}`; `{% filter %}` blocks; `{% raw %}`; `{# #}` comments;
-`is` tests; the comparison and boolean operators.
+9. **A missing include is an error, not an empty expansion.** A
+   production build that silently dropped a header is worse than one
+   that failed. A development server that wants the other behaviour
+   catches `ErrorTemplateNotFound` and carries on.
+10. **An error carries a chain, not a line.** A page extends a base,
+    which includes a header, which includes a navigation bar, and the
+    variable that was missing was missing in the navigation bar,
+    referenced from a block the page defined. `TeraError` carries the
+    kind, a span and a list of frames. `teraerror.report` renders the
+    whole chain with the source lines, `one_line` is the log form, and
+    `missing_template` is the one question a caller asks without
+    matching on the error.
+11. **A context holds values, never functions.** `TeraValue` has no
+    function variant. Logic goes in a filter, and a filter is something
+    the caller enumerated, so a template can reach nothing the caller
+    did not put in the context or the registry.
+12. **A template is parsed, so content is content.** A page whose body
+    contains the literal text `{{ title }}`, such as a page documenting
+    this syntax, renders that text. An engine that substituted into a
+    string and substituted again would replace it.
 
-**Out, and why:**
+## What the language includes
 
-- **`{% while %}`.** A template that can loop unboundedly is a template
-  that can hang a render. Every loop here is over a finite collection,
-  and `max_iterations` bounds even that.
+`{{ }}` with dotted paths and indices. Filters with arguments.
+`{% if %}`, `{% elif %}`, `{% else %}`. `{% for %}` with `{% else %}`
+and the `loop` variables. `{% set %}`. `{% include %}`.
+`{% extends %}`, `{% block %}` and `{{ super() }}`. `{% macro %}` and
+`{% import %}`. `{% filter %}` blocks. `{% raw %}`. `{# #}` comments.
+`is` tests. The comparison and boolean operators. Whitespace control
+with `{%-` and `-%}`.
+
+## What is not included
+
+- **`{% while %}`.** A template that can loop unboundedly can hang a
+  render. Every loop here is over a finite collection, and
+  `max_iterations` bounds even that.
 - **Arbitrary expressions.** No arithmetic beyond what a comparison
-  needs, no method calls, no way to reach anything the caller did not
-  put in the context or the registry. A template that can call
-  arbitrary code is a program with the worst possible syntax.
-- **Functions in a context.** `TeraValue` has no function variant, on
-  purpose. Logic goes in a filter, and a filter is a thing the caller
-  enumerated.
-- **Template loading of any kind.** No paths, no globs, no directories.
-  That is the layer, and `set_missing` is the answer.
-- **Whitespace control** (`{%-` and `-%}`) is **in**, because a
-  template that cannot control its own whitespace produces HTML nobody
-  can read — but it is the only piece of syntax here that exists purely
-  for the look of the output.
+  needs, no method calls, and no way to reach anything the caller did
+  not register. A template that can call arbitrary code is a program
+  with an awkward syntax.
+- **Loading templates from anywhere.** No paths, no globs, no
+  directories. See rule 1.
+- **A `markdown` filter or a `date` filter.** The registry is a value,
+  so a caller that wants one registers it in a line:
+  `terafilter.with_filter(terafilter.builtin_filters(), terafilter.filter("markdown", to_html))`.
+  A package in the web category depending on a text package to supply a
+  filter most callers will not use is the wrong direction.
+- **Compiling templates to code.** That needs a build step and a macro
+  system, and it costs a template being a file somebody can edit.
+- **Internationalisation.** A `t` filter over a catalogue the caller
+  supplies is how this package and
+  [i18n-nv](https://novo-lang.org/packages/i18n-nv) meet.
+- **A sandbox beyond what the language already is.** There is no way to
+  reach anything the caller did not register, and `TeraLimits` bounds
+  the resources. There is no third kind of sandbox.
+- **Anything that reads, fetches or consults a clock.** This package
+  declares no effects.
+- **A build for a microcontroller.** The value model is a growable tree
+  of strings.
 
-## Errors that name the line, and the chain that reached it
+## Related packages
 
-A page extends a base, which includes a header, which includes a nav —
-and the variable that was missing was missing in the nav, referenced
-from a block the page defined. One line number describes none of that.
+- [html-nv](https://novo-lang.org/packages/html-nv) supplies the
+  escape, and nothing else: this package does not parse its own output.
+  One escape used by both packages is one rule on the page rather than
+  two. This package depends on it.
+- [markdown-nv](https://novo-lang.org/packages/markdown-nv) turns
+  Markdown into HTML, and is what a `markdown` filter would call.
+- [static-nv](https://novo-lang.org/packages/static-nv) serves the
+  files a rendered site becomes.
+- [rss-nv](https://novo-lang.org/packages/rss-nv) writes a feed for the
+  same site, and is a writer rather than a template.
+- [i18n-nv](https://novo-lang.org/packages/i18n-nv) holds the message
+  catalogue a `t` filter would read.
 
-```text
-unknown variable `user.nmae` in `nav.html`, line 4
-  4 |   <a href="/u/{{ user.nmae }}">
-    |                  ^^^^^^^^^
-  included from `header.html`, line 12
-  included from `base.html`, line 3
-  in block `content` of `page.html`, line 8
+## Tests
+
+```bash
+novo test tests/teraval_tests.nv      # the value model's rules
+novo test tests/teraparse_tests.nv    # the set, inheritance, and the errors
+novo test tests/terarender_tests.nv   # the language, and autoescaping first
 ```
 
-`TeraError` carries the kind, a `TeraSpan` and a `[TeraFrame]` chain;
-`teraerror.report` renders the above, `one_line` is the log form, and
-`missing_template` is the one question a host asks without matching on
-the error at all.
+The reference implementations are Tera, for the template set, the
+inheritance model, the registries and the escape-by-suffix rule, and
+Jinja2, for the language itself: the `loop` variables, the truthiness
+rule, `{{ super() }}`, and the decision that a template is not a
+programming language. MiniJinja is the reference for the value model
+being the one the caller's data is already in, and Askama is the
+reference for what compiling templates costs.
 
-**`teraparse.set_check` moves the worst of them to build time.** A
-block a child overrides that no parent defines — `{% block contnet %}`
-— otherwise renders a page with the content silently missing, which is
-the single most frustrating template bug there is. `set_check` finds
-it, along with extends cycles and missing parents, before anything is
-rendered.
+The oracles are Tera's and Jinja2's own suites, which are pairs of a
+template and its output. The autoescaping corpus is this package's own,
+because that part is a security property rather than a feature.
 
-## The layer, and the device claim
+The suite asserts that a value containing `<script>` renders escaped in
+a `.html` template and unescaped in a `.txt` one, that `| safe` turns
+escaping off for one value and nothing else, that a null value renders
+empty and is false, that a map iterates in insertion order, that a
+block a child overrides and no parent defines is reported by
+`set_check` rather than rendering an empty page, that an extends cycle
+is refused, and that each of the three limits stops a render.
 
-`core` — no effects. Parsing is arithmetic, rendering appends to the
-caller's buffer, and the one thing that would need the machine —
-reading another template — is what `set_missing` hands back to the
-host.
+The tests compile today and fail at run, each on the
+`not implemented: tera-nv.<module>.<fn>` panic that is its body. That
+is the expected state of an interface release. They turn green one at a
+time as bodies land.
 
-**No `@tier(embedded)` claim, and none is intended.** The value model
-is a growable tree of `Str`, and a device rendering HTML templates is
-not a thing. The audit's `core-embedded` row passes as *makes no device
-claim*.
+## Implementation status
 
-## Where the names come from, and the ones that were taken
+| Item | Implemented |
+| --- | --- |
+| Every `pub struct` and `pub enum` in the five modules | the types are declared |
+| `teraerror.report`, `.one_line`, `.missing_template`, `TeraError.message` | no |
+| `teraval.context_new`, `.context_insert`, `.context_get`, `.context_names`, `.context_from_map` | no |
+| `teraval.lookup`, `.is_truthy`, `.to_display`, `.to_json`, `.type_name`, `.equals`, `.compare` | no |
+| `teraparse.default_limits`, `.parse` | no |
+| `teraparse.template_name`, `.template_source`, `.references`, `.extends_name` | no |
+| `teraparse.blocks`, `.variables`, `.filters_used` | no |
+| `teraparse.set_new`, `.set_with`, `.set_add`, `.set_add_parsed`, `.set_names`, `.set_get` | no |
+| `teraparse.set_missing`, `.set_check`, `.set_sources`, `.escapes_name` | no |
+| `terafilter.builtin_filters`, `.no_filters`, `.with_filter`, `.without_filter` | no |
+| `terafilter.filter_names`, `.get`, `.filter`, `.refuse` | no |
+| `terafilter.builtin_tests`, `.with_test`, `.test_names` | no |
+| `terarender.render`, `.render_with`, `.render_str`, `.render_one`, `.render_block` | no |
+| `terarender.escape`, `.escape_into`, `.loop_variable_names`, `.missing` | no |
 
-Public type names are unique across the whole assembly, dependencies
-included. This package had the most obvious names to give up, because
-every noun a template engine wants is a noun.
+## Licence
 
-| here | the obvious name | why not |
-| --- | --- | --- |
-| `TeraTemplate` | `Template` | the single most certain collision on the registry — template-nv is a planned row, and `strfmt` is a module already in use |
-| `TeraContext` | `Context` | generic enough that four packages will want it |
-| `TeraValue`, `TeraPair` | `Value`, `Pair` | `TomlValue`, `YamlValue` and `ConfigValue` are the precedent; `Pair` is already published |
-| `TeraSet` | `Set` | `Set` is a **standard-library type** |
-| `TeraError`, `TeraSpan`, `TeraFrame` | `Error`, `Span`, `Frame` | `Error` is a standard-library **trait**; `Frame` and `FrameRef` are published by frame-nv; `Span` is a module name in use |
-| `TeraFilter`, `TeraFilters` | `Filter`, `Filters` | `ResizeFilter` and `PngFilter` are published, and `Filter` is what a query package will want |
-| `TeraTest`, `TeraTests` | `Test` | `std.test` is a standard-library module, and `PropCheck` and `StTestResult` are the precedent for prefixing |
-| `TeraEscape`, `TeraLimits`, `TeraRender` | `Escape`, `Limits`, `Render` | `AnsiLimits`, `WsLimits`, `MqttLimits` and `KeyLimits` are all published — `Limits` was gone four times over |
-| module `teraparse`, `teraval`, … | `tera`, `template`, `render`, `value`, `error`, `filter` | every one of the six is a name another package will want; `error` in particular is certain |
+Apache-2.0. See `LICENSE`.
 
-## The reference implementation
-
-**Tera** for the whole shape: the template set, the inheritance model,
-the filter and test registries, and the autoescape-by-suffix rule.
-**Jinja2** for the language itself — the `loop` variables, the
-truthiness rule, `{{ super() }}`, and the decision that a template is
-not a programming language. **MiniJinja** for the observation that the
-value model should be the one the caller's data is already in.
-**Askama** for what is lost by compiling templates instead, which is
-why these are parsed at run time. **The static site generator's
-`render_template`** for the include budget, and for the reminder that
-a substitution-based engine re-substitutes its own output.
-
-The oracles are Tera's and Jinja2's own suites — the template-and-
-output pairs both projects ship — plus this package's own autoescape
-corpus, which is the part that is a security property rather than a
-feature and so is not taken from anybody else's tests.
-
-Deliberately left out, and where it goes instead:
-
-- **Loading templates from anywhere.** The layer. `set_missing`.
-- **A `markdown` or a `date` filter.** markdown-nv and calendar-nv, and
-  three lines of registration.
-- **Compiling templates to code.** Askama's model, and it needs a
-  build step and a macro system; the cost is that a template stops
-  being a file somebody can edit.
-- **Internationalisation.** i18n-nv's row. A `t` filter over a
-  catalogue the caller supplies is how the two meet.
-- **Sandboxing beyond what the language already is.** There is no way
-  to reach anything the caller did not register, which is the
-  sandbox; a resource sandbox is `TeraLimits`, and there is no third
-  kind.
-
-## Status
-
-Every function is `todo()`. Three suites, all red, all for the same
-reason — every assertion reaches `not implemented: tera-nv.<fn>`, which
-is the expected result until the bodies land.
-
-```
-novo test --isolate tests/teraval_tests.nv       # the value model's surprises
-novo test --isolate tests/teraparse_tests.nv     # the set, the inheritance, the errors
-novo test --isolate tests/terarender_tests.nv    # the language, and autoescaping first
-```
-
-`novo doc` renders and its examples compile.
+<!-- docs/writing-a-readme.md is the style guide for this page. -->

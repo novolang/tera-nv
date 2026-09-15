@@ -1,6 +1,6 @@
 [package]
 name        = "tera-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The Tera and Jinja2 template language, sans-IO: a template parsed once and rendered many times, a set of templates the caller fills so that `extends` and `include` resolve without the engine ever opening a file, filters and tests as registries the caller extends, autoescaping on by default through html-nv's own escape, and errors that name the template, the line and the include chain that reached it.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
