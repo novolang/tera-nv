@@ -1,6 +1,6 @@
 [package]
 name        = "tera-nv"
-version     = "0.0.2"
+version     = "0.0.3"
 description = "The Tera and Jinja2 template language, sans-IO: a template parsed once and rendered many times, a set of templates the caller fills so that `extends` and `include` resolve without the engine ever opening a file, filters and tests as registries the caller extends, autoescaping on by default through html-nv's own escape, and errors that name the template, the line and the include chain that reached it.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
@@ -58,4 +58,4 @@ novo        = ">= 0.8.9"
 # the two packages are developed together in one tree and html-nv is
 # not on the registry yet; publish html-nv first, because a package
 # cannot be published ahead of what it depends on.
-html-nv = "^0.0.1"
+html-nv = "^0.1.0"
