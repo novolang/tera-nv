@@ -1,0 +1,387 @@
+// filter_tests.nv — every builtin filter and test, called directly.
+//
+// Jinja2 has no oracle for most of these: either the name does not
+// exist there (`slugify`, `nth`, `group_by`, `linebreaks`, `matching`)
+// or the behaviour differs (`truncate` has a leeway and an ellipsis,
+// `title`'s word rule is Jinja's but `striptags` also collapses
+// whitespace there).  Each expected value below is derived by hand from
+// the rule written in the comment above it, which is the rule in the
+// doc comment of `builtin_filters` or the one named there.  The ones
+// Jinja2 does share are in `oracle_tests.nv`.
+
+use std.test
+use std.list
+use teraval
+use terafilter
+use teraerror
+
+fn s(t: Str) -> teraval.TeraValue
+    ValueStr(t)
+
+fn n(v: Int) -> teraval.TeraValue
+    ValueInt(v)
+
+fn xs(items: [teraval.TeraValue]) -> teraval.TeraValue
+    ValueList(items)
+
+fn pair(k: Str, v: teraval.TeraValue) -> teraval.TeraPair
+    teraval.TeraPair { key: k, value: v }
+
+// The filter's answer as the text a template would show, or REFUSED
+// when the filter returned an error.
+fn show(name: Str, v: teraval.TeraValue, args: [teraval.TeraValue]) -> Str
+    match terafilter.get(terafilter.builtin_filters(), name)
+        None    => "NO SUCH FILTER"
+        Some(f) =>
+            match f.apply(v, args)
+                Ok(out) => teraval.to_json(out)
+                Err(_)  => "REFUSED"
+
+fn verdict(name: Str, v: teraval.TeraValue, args: [teraval.TeraValue]) -> Str
+    var found = TeraTest { name: "", check: never }
+    for t in terafilter.builtin_tests().tests
+        if t.name == name
+            found = t
+    match found.check(v, args)
+        Ok(b)  => str_bool(b)
+        Err(_) => "REFUSED"
+
+fn str_bool(b: Bool) -> Str
+    if b
+        return "yes"
+    "no"
+
+@test
+fn test_text_filters() [io]
+    test.case("upper and lower change ASCII letters")
+    test.assert(show("upper", s("aB1"), []) == "\"AB1\"")
+    test.assert(show("lower", s("aB1"), []) == "\"ab1\"")
+    test.assert(show("upper", s("héllo"), []) == "\"HéLLO\"")
+    test.assert(show("lower", s("HÉLLO"), []) == "\"hÉllo\"")
+    test.assert(show("upper", n(1), []) == "REFUSED")
+    test.assert(show("lower", n(1), []) == "REFUSED")
+
+    test.case("capitalize: first character upper, the rest lower")
+    test.assert(show("capitalize", s("hELLO wORLD"), []) == "\"Hello world\"")
+    test.assert(show("capitalize", s(""), []) == "\"\"")
+    test.assert(show("capitalize", n(1), []) == "REFUSED")
+
+    test.case("title: a word starts after white space, a hyphen or an opening bracket")
+    test.assert(show("title", s("hello wORLD-foo (bar)"), []) == "\"Hello World-Foo (Bar)\"")
+    test.assert(show("title", n(1), []) == "REFUSED")
+
+    test.case("trim, trim_start and trim_end")
+    test.assert(show("trim", s("  a b \n"), []) == "\"a b\"")
+    test.assert(show("trim_start", s("  a "), []) == "\"a \"")
+    test.assert(show("trim_end", s("  a "), []) == "\"  a\"")
+    test.assert(show("trim", n(1), []) == "REFUSED")
+    test.assert(show("trim_start", n(1), []) == "REFUSED")
+    test.assert(show("trim_end", n(1), []) == "REFUSED")
+
+    test.case("truncate keeps the first n characters, and adds the end text only when it cut")
+    test.assert(show("truncate", s("abcdef"), [n(3)]) == "\"abc\"")
+    test.assert(show("truncate", s("abc"), [n(3)]) == "\"abc\"")
+    test.assert(show("truncate", s("héllo"), [n(2)]) == "\"hé\"")
+    test.assert(show("truncate", s("abcdef"), [n(3), s("...")]) == "\"abc...\"")
+    test.assert(show("truncate", s("abc"), [n(3), s("...")]) == "\"abc\"")
+    test.assert(show("truncate", s("abcdef"), []) == "\"abcdef\"")
+    test.assert(show("truncate", s("abc"), [s("x")]) == "REFUSED")
+    test.assert(show("truncate", s("abc"), [n(1), n(2)]) == "REFUSED")
+    test.assert(show("truncate", n(1), [n(1)]) == "REFUSED")
+
+    test.case("wordcount counts runs of white space between words")
+    test.assert(show("wordcount", s(" one  two\nthree "), []) == "3")
+    test.assert(show("wordcount", s(""), []) == "0")
+    test.assert(show("wordcount", n(1), []) == "REFUSED")
+
+    test.case("replace changes every occurrence, and an empty search changes nothing")
+    test.assert(show("replace", s("banana"), [s("an"), s("AN")]) == "\"bANANa\"")
+    test.assert(show("replace", s("banana"), [s(""), s("x")]) == "\"banana\"")
+    test.assert(show("replace", s("banana"), []) == "\"banana\"")
+    test.assert(show("replace", s("banana"), [n(1)]) == "REFUSED")
+    test.assert(show("replace", n(1), []) == "REFUSED")
+
+    test.case("indent puts n spaces before every line but the first, and leaves blank lines")
+    test.assert(show("indent", s("a\nb"), [n(2)]) == "\"a\\n  b\"")
+    test.assert(show("indent", s("a\n\nb"), [n(2)]) == "\"a\\n\\n  b\"")
+    test.assert(show("indent", s("a\nb"), []) == "\"a\\n    b\"")
+    test.assert(show("indent", s("a"), [s("x")]) == "REFUSED")
+    test.assert(show("indent", n(1), []) == "REFUSED")
+
+    test.case("linebreaks turns each newline, and a carriage return and newline, into <br>")
+    test.assert(show("linebreaks", s("a\nb\r\nc"), []) == "\"a<br>b<br>c\"")
+    test.assert(show("linebreaks", n(1), []) == "REFUSED")
+
+    test.case("striptags drops everything from < to the next >, and a lone > stays")
+    test.assert(show("striptags", s("<p>a <b>b</b></p>"), []) == "\"a b\"")
+    test.assert(show("striptags", s("1 > 0"), []) == "\"1 > 0\"")
+    test.assert(show("striptags", n(1), []) == "REFUSED")
+
+    test.case("slugify: lower-case letters and digits, one hyphen for any other run, none at the ends")
+    test.assert(show("slugify", s("Hello, World! 2026"), []) == "\"hello-world-2026\"")
+    test.assert(show("slugify", s("  --A__b--  "), []) == "\"a-b\"")
+    test.assert(show("slugify", s("héllo"), []) == "\"h-llo\"")
+    test.assert(show("slugify", s("***"), []) == "\"\"")
+    test.assert(show("slugify", n(1), []) == "REFUSED")
+
+@test
+fn test_collection_filters() [io]
+    let abc = xs([s("a"), s("b"), s("c")])
+    let m = ValueMap([pair("a", n(1)), pair("b", n(2))])
+
+    test.case("length counts characters, items and entries")
+    test.assert(show("length", s("héllo"), []) == "5")
+    test.assert(show("length", abc, []) == "3")
+    test.assert(show("length", m, []) == "2")
+    test.assert(show("length", n(1), []) == "REFUSED")
+
+    test.case("first and last: an item, null when there is none, a character of a string")
+    test.assert(show("first", abc, []) == "\"a\"")
+    test.assert(show("last", abc, []) == "\"c\"")
+    test.assert(show("first", xs([]), []) == "null")
+    test.assert(show("last", xs([]), []) == "null")
+    test.assert(show("first", s("héy"), []) == "\"h\"")
+    test.assert(show("last", s("héy"), []) == "\"y\"")
+    test.assert(show("first", n(1), []) == "REFUSED")
+    test.assert(show("last", n(1), []) == "REFUSED")
+
+    test.case("nth counts from 0 and answers null past either end")
+    test.assert(show("nth", abc, [n(1)]) == "\"b\"")
+    test.assert(show("nth", abc, [n(3)]) == "null")
+    test.assert(show("nth", abc, [n(0 - 1)]) == "null")
+    test.assert(show("nth", abc, []) == "\"a\"")
+    test.assert(show("nth", n(1), [n(0)]) == "REFUSED")
+
+    test.case("reverse")
+    test.assert(show("reverse", abc, []) == "[\"c\",\"b\",\"a\"]")
+    test.assert(show("reverse", s("héy"), []) == "\"yéh\"")
+    test.assert(show("reverse", n(1), []) == "REFUSED")
+
+    test.case("join shows each item as a template would")
+    test.assert(show("join", xs([n(1), s("a"), ValueNull, ValueBool(true)]), [s("-")]) == "\"1-a--true\"")
+    test.assert(show("join", abc, []) == "\"abc\"")
+    test.assert(show("join", abc, [n(1)]) == "REFUSED")
+    test.assert(show("join", n(1), []) == "REFUSED")
+
+    test.case("sort orders numbers as numbers and strings as bytes, and keeps equal items in order")
+    test.assert(show("sort", xs([n(3), ValueFloat(1.5), n(2)]), []) == "[1.5,2,3]")
+    test.assert(show("sort", xs([s("b"), s("a")]), []) == "[\"a\",\"b\"]")
+    test.assert(show("sort", xs([]), []) == "[]")
+    test.assert(show("sort", xs([n(1)]), []) == "[1]")
+    test.assert(show("sort", xs([n(2), n(1), n(2), n(1)]), []) == "[1,1,2,2]")
+    test.assert(show("sort", xs([n(1), s("a")]), []) == "REFUSED")
+    test.assert(show("sort", xs([n(1), n(2), s("a")]), []) == "REFUSED")
+    test.assert(show("sort", xs([n(1), s("a"), n(2)]), []) == "REFUSED")
+    test.assert(show("sort", n(1), []) == "REFUSED")
+    let rows = xs([ValueMap([pair("k", n(2)), pair("v", s("x"))]),
+                   ValueMap([pair("k", n(1)), pair("v", s("y"))])])
+    test.assert(show("sort", rows, [s("k")]) == "[{\"k\":1,\"v\":\"y\"},{\"k\":2,\"v\":\"x\"}]")
+    test.assert(show("sort", rows, [s("nope")]) == "REFUSED")
+    test.assert(show("sort", rows, [n(1)]) == "REFUSED")
+
+    test.case("unique keeps the first of equal items")
+    test.assert(show("unique", xs([n(1), n(2), ValueFloat(1.0), s("a"), s("a")]), []) == "[1,2,\"a\"]")
+    test.assert(show("unique", n(1), []) == "REFUSED")
+
+    test.case("slice is [start, end), clamped to the list; a string slices by characters")
+    let five = xs([n(0), n(1), n(2), n(3), n(4)])
+    test.assert(show("slice", five, [n(1), n(3)]) == "[1,2]")
+    test.assert(show("slice", five, [n(3)]) == "[3,4]")
+    test.assert(show("slice", five, [n(0 - 2), n(99)]) == "[0,1,2,3,4]")
+    test.assert(show("slice", five, [n(4), n(2)]) == "[]")
+    test.assert(show("slice", s("héllo"), [n(1), n(3)]) == "\"él\"")
+    test.assert(show("slice", n(1), []) == "REFUSED")
+    test.assert(show("slice", five, [s("a")]) == "REFUSED")
+
+    test.case("map takes a field from each item")
+    test.assert(show("map", rows, [s("v")]) == "[\"x\",\"y\"]")
+    test.assert(show("map", rows, [s("nope")]) == "REFUSED")
+    test.assert(show("map", n(1), [s("v")]) == "REFUSED")
+
+    test.case("filter keeps items whose field equals the value; an item without the field is left out")
+    let mixed = xs([ValueMap([pair("k", n(1))]), ValueMap([pair("z", n(1))]), ValueMap([pair("k", n(2))])])
+    test.assert(show("filter", mixed, [s("k"), n(1)]) == "[{\"k\":1}]")
+    test.assert(show("filter", mixed, [s("k")]) == "[]")
+    test.assert(show("filter", n(1), [s("k"), n(1)]) == "REFUSED")
+
+    test.case("group_by makes a map from a field's value to the items, in order of first appearance")
+    let people = xs([ValueMap([pair("c", s("o")), pair("n", s("a"))]),
+                     ValueMap([pair("c", s("b")), pair("n", s("b"))]),
+                     ValueMap([pair("c", s("o")), pair("n", s("c"))])])
+    test.assert(show("group_by", people, [s("c")])
+                == "{\"o\":[{\"c\":\"o\",\"n\":\"a\"},{\"c\":\"o\",\"n\":\"c\"}],\"b\":[{\"c\":\"b\",\"n\":\"b\"}]}")
+    test.assert(show("group_by", people, [s("nope")]) == "REFUSED")
+    test.assert(show("group_by", n(1), [s("c")]) == "REFUSED")
+
+@test
+fn test_number_filters() [io]
+    test.case("abs")
+    test.assert(show("abs", n(0 - 5), []) == "5")
+    test.assert(show("abs", ValueFloat(0.0 - 2.5), []) == "2.5")
+    test.assert(show("abs", s("x"), []) == "REFUSED")
+
+    test.case("round: halves go away from zero, an int stays an int")
+    test.assert(show("round", ValueFloat(2.5), []) == "3.0")
+    test.assert(show("round", ValueFloat(0.0 - 2.5), []) == "-3.0")
+    test.assert(show("round", ValueFloat(3.14159), [n(1)]) == "3.1")
+    test.assert(show("round", ValueFloat(3.14159), [n(3)]) == "3.142")
+    test.assert(show("round", n(7), []) == "7")
+    test.assert(show("round", s("x"), []) == "REFUSED")
+    test.assert(show("round", ValueFloat(1.5), [s("x")]) == "REFUSED")
+
+    test.case("int cuts a fraction off, reads a string, and falls back to its argument or 0")
+    test.assert(show("int", ValueFloat(3.9), []) == "3")
+    test.assert(show("int", ValueFloat(0.0 - 3.9), []) == "-3")
+    test.assert(show("int", n(4), []) == "4")
+    test.assert(show("int", s(" 12 "), []) == "12")
+    test.assert(show("int", s("3.7"), []) == "3")
+    test.assert(show("int", s("x"), []) == "0")
+    test.assert(show("int", s("x"), [n(7)]) == "7")
+    test.assert(show("int", ValueBool(true), []) == "1")
+    test.assert(show("int", ValueBool(false), []) == "0")
+    test.assert(show("int", ValueNull, []) == "0")
+    test.assert(show("int", ValueNull, [n(9)]) == "9")
+    test.assert(show("int", n(1), [s("x")]) == "REFUSED")
+
+    test.case("float")
+    test.assert(show("float", n(2), []) == "2.0")
+    test.assert(show("float", s(" 2.5 "), []) == "2.5")
+    test.assert(show("float", s("x"), []) == "0.0")
+    test.assert(show("float", ValueFloat(1.5), []) == "1.5")
+    test.assert(show("float", ValueNull, []) == "0.0")
+
+    test.case("filesizeformat: powers of a thousand, one decimal")
+    test.assert(show("filesizeformat", n(0), []) == "\"0 Bytes\"")
+    test.assert(show("filesizeformat", n(1), []) == "\"1 Byte\"")
+    test.assert(show("filesizeformat", n(999), []) == "\"999 Bytes\"")
+    test.assert(show("filesizeformat", n(1000), []) == "\"1.0 kB\"")
+    test.assert(show("filesizeformat", ValueFloat(1500.0), []) == "\"1.5 kB\"")
+    test.assert(show("filesizeformat", n(2000000000), []) == "\"2.0 GB\"")
+    test.assert(show("filesizeformat", n(4000000000000000000), []) == "\"4.0 EB\"")
+    test.assert(show("filesizeformat", ValueFloat(5000000000000000000000000000.0), []) == "\"5000.0 YB\"")
+    test.assert(show("filesizeformat", s("x"), []) == "REFUSED")
+
+@test
+fn test_escaping_and_encoding_filters() [io]
+    test.case("escape is html-nv's five characters, and shows a number as its digits")
+    test.assert(show("escape", s("<&>\"'"), []) == "\"&lt;&amp;&gt;&quot;&#39;\"")
+    test.assert(show("escape", n(5), []) == "\"5\"")
+
+    test.case("escape_xml spells the apostrophe &apos;")
+    test.assert(show("escape_xml", s("<&>\"'"), []) == "\"&lt;&amp;&gt;&quot;&apos;\"")
+
+    test.case("safe returns its value")
+    test.assert(show("safe", s("<b>"), []) == "\"<b>\"")
+
+    test.case("urlencode keeps / and the unreserved bytes; the strict form encodes the slash")
+    test.assert(show("urlencode", s("a b/c-d_e.f~g"), []) == "\"a%20b/c-d_e.f~g\"")
+    test.assert(show("urlencode_strict", s("a b/c"), []) == "\"a%20b%2Fc\"")
+    test.assert(show("urlencode", s("é?"), []) == "\"%C3%A9%3F\"")
+    test.assert(show("urlencode", n(12), []) == "\"12\"")
+
+    test.case("json_encode is to_json")
+    test.assert(show("json_encode", xs([n(1), s("a")]), []) == "\"[1,\\\"a\\\"]\"")
+
+    test.case("default: the argument for null, the value otherwise, and for a false value when asked")
+    test.assert(show("default", ValueNull, [s("-")]) == "\"-\"")
+    test.assert(show("default", ValueNull, []) == "\"\"")
+    test.assert(show("default", s("x"), [s("-")]) == "\"x\"")
+    test.assert(show("default", s(""), [s("-")]) == "\"\"")
+    test.assert(show("default", s(""), [s("-"), ValueBool(true)]) == "\"-\"")
+    test.assert(show("default", s("x"), [s("-"), ValueBool(true)]) == "\"x\"")
+    test.assert(show("default", n(0), [s("-"), ValueBool(false)]) == "0")
+
+@test
+fn test_the_builtin_tests() [io]
+    test.case("defined and undefined answer for a value that exists")
+    test.assert(verdict("defined", ValueNull, []) == "yes")
+    test.assert(verdict("undefined", ValueNull, []) == "no")
+
+    test.case("null, string and number look at the kind")
+    test.assert(verdict("null", ValueNull, []) == "yes")
+    test.assert(verdict("null", n(0), []) == "no")
+    test.assert(verdict("string", s("a"), []) == "yes")
+    test.assert(verdict("string", n(1), []) == "no")
+    test.assert(verdict("number", n(1), []) == "yes")
+    test.assert(verdict("number", ValueFloat(1.5), []) == "yes")
+    test.assert(verdict("number", s("1"), []) == "no")
+
+    test.case("odd and even need an int")
+    test.assert(verdict("odd", n(3), []) == "yes")
+    test.assert(verdict("odd", n(4), []) == "no")
+    test.assert(verdict("odd", n(0 - 3), []) == "yes")
+    test.assert(verdict("even", n(4), []) == "yes")
+    test.assert(verdict("even", n(3), []) == "no")
+    test.assert(verdict("odd", s("a"), []) == "REFUSED")
+    test.assert(verdict("even", s("a"), []) == "REFUSED")
+
+    test.case("divisibleby refuses a zero divisor and a non-int")
+    test.assert(verdict("divisibleby", n(9), [n(3)]) == "yes")
+    test.assert(verdict("divisibleby", n(9), [n(4)]) == "no")
+    test.assert(verdict("divisibleby", n(9), [n(0)]) == "REFUSED")
+    test.assert(verdict("divisibleby", n(9), []) == "REFUSED")
+    test.assert(verdict("divisibleby", n(9), [s("a")]) == "REFUSED")
+    test.assert(verdict("divisibleby", s("a"), [n(3)]) == "REFUSED")
+
+    test.case("starting_with and ending_with")
+    test.assert(verdict("starting_with", s("abc"), [s("ab")]) == "yes")
+    test.assert(verdict("starting_with", s("abc"), [s("bc")]) == "no")
+    test.assert(verdict("starting_with", n(1), [s("a")]) == "REFUSED")
+    test.assert(verdict("starting_with", s("abc"), [n(1)]) == "REFUSED")
+    test.assert(verdict("ending_with", s("abc"), [s("bc")]) == "yes")
+    test.assert(verdict("ending_with", s("abc"), [s("ab")]) == "no")
+    test.assert(verdict("ending_with", n(1), [s("a")]) == "REFUSED")
+
+    test.case("containing: a substring, an item, a key")
+    test.assert(verdict("containing", s("abc"), [s("b")]) == "yes")
+    test.assert(verdict("containing", s("abc"), [s("x")]) == "no")
+    test.assert(verdict("containing", s("abc"), [n(1)]) == "REFUSED")
+    test.assert(verdict("containing", xs([n(1), n(2)]), [n(2)]) == "yes")
+    test.assert(verdict("containing", xs([n(1), n(2)]), [n(3)]) == "no")
+    test.assert(verdict("containing", ValueMap([pair("a", n(1))]), [s("a")]) == "yes")
+    test.assert(verdict("containing", ValueMap([pair("a", n(1))]), [s("b")]) == "no")
+    test.assert(verdict("containing", ValueMap([pair("a", n(1))]), [n(1)]) == "REFUSED")
+    test.assert(verdict("containing", n(1), [n(1)]) == "REFUSED")
+    test.assert(verdict("containing", xs([ValueNull]), []) == "yes")
+
+    test.case("matching takes a regular expression, and refuses one that does not compile")
+    test.assert(verdict("matching", s("abc"), [s("^a.c$")]) == "yes")
+    test.assert(verdict("matching", s("abd"), [s("^a.c$")]) == "no")
+    test.assert(verdict("matching", s("abc"), [s("(")]) == "REFUSED")
+    test.assert(verdict("matching", n(1), [s("a")]) == "REFUSED")
+    test.assert(verdict("matching", s("abc"), []) == "yes")
+
+@test
+fn test_the_registries() [io]
+    test.case("a registry lists its names sorted, and a name added twice is replaced")
+    let base = terafilter.builtin_filters()
+    let names = terafilter.filter_names(base)
+    test.assert(list.len(names) == 38)
+    test.assert(names[0] == "abs")
+    test.assert(terafilter.get(base, "nothing") == None)
+    let twice = terafilter.with_filter(base, terafilter.filter("abs", id))
+    test.assert(list.len(terafilter.filter_names(twice)) == 38)
+
+    test.case("without_filter removes one name and no other")
+    let fewer = terafilter.without_filter(base, "abs")
+    test.assert(list.len(terafilter.filter_names(fewer)) == 37)
+    test.assert(terafilter.get(fewer, "abs") == None)
+    test.assert(terafilter.get(fewer, "upper") != None)
+
+    test.case("tests: sorted names, and replacement")
+    let ts = terafilter.builtin_tests()
+    test.assert(list.len(terafilter.test_names(ts)) == 12)
+    test.assert(terafilter.test_names(ts)[0] == "containing")
+    let swapped = terafilter.with_test(ts, TeraTest { name: "odd", check: never })
+    test.assert(list.len(terafilter.test_names(swapped)) == 12)
+
+    test.case("refuse names the filter, what it wanted and what it got")
+    let e = terafilter.refuse("upper", "a string", n(1))
+    test.assert(teraerror.one_line(e) == ":1:1: filter `upper` wanted a string, got int")
+
+fn id(v: teraval.TeraValue,
+      args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    Ok(v)
+
+fn never(v: teraval.TeraValue, args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    Ok(false)

@@ -1,17 +1,9 @@
-// terarender_tests.nv — the API suite for the language and the
-// renderer.
+// terarender_tests.nv — the language and the renderer through the API.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: tera-nv.<fn>`.
-//
-// THE CASES ARE TERA's AND JINJA2's OWN.  Each one below is a
-// construct from Tera's documentation or from the Jinja2 template
-// designer documentation, written as the template and the output it
-// must produce, and the two suites those projects ship become
-// generated runs beside this one when the implementation lands.
-//
-// THE AUTOESCAPE TESTS COME FIRST because they are the ones that are
-// a security property rather than a feature.
+// Each case is a construct from Tera's or Jinja2's documentation,
+// written as a template and the output it produces. Autoescaping comes
+// first, because it is a security property and not a feature. The
+// cases Jinja2 can judge are repeated against it in `oracle_tests.nv`.
 
 use std.test
 use std.list
@@ -24,7 +16,7 @@ use teraerror
 fn render(source: Str, ctx: teraval.TeraContext) -> Str [io]
     match terarender.render_one(source, ctx)
         Err(_) =>
-            todo("terarender_tests.render — the template did not render")
+            core.panic.panic("terarender_tests.render: the template did not render")
         Ok(s)  =>
             s
 
@@ -317,6 +309,6 @@ fn test_the_four_other_ways_in_are_the_same_render() [io]
 fn parsed(name: Str, source: Str) -> teraparse.TeraTemplate [io]
     match teraparse.parse(name, source)
         Err(_) =>
-            todo("terarender_tests.parsed — the template did not parse")
+            core.panic.panic("terarender_tests.parsed: the template did not parse")
         Ok(t)  =>
             t

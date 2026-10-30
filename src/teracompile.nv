@@ -1,0 +1,741 @@
+// teracompile.nv — a template's text into a tree.
+//
+// Package-internal: `teraparse.parse` is the way in.
+//
+// The text is read once, left to right.  Text outside a tag becomes a
+// text node, and each `{{ }}`, `{% %}` and `{# #}` is cut out, its
+// contents split into tokens, and parsed as an expression or as the
+// tag its first word names.  A tag that opens a body (`if`, `for`,
+// `block`, `macro`, `filter`) reads nodes until one of the tags that
+// can end it, and the tag that ended it is left for the caller to read.
+//
+// Expressions are parsed by precedence, loosest first: `or`, `and`,
+// `not`, a comparison or an `is` test, then filters, then a path or a
+// literal.  A filter binds tighter than a comparison, so
+// `a | length > 2` compares the length.
+
+use std.str
+use std.list
+use teraerror
+use teraval
+use teranode
+
+// One token of a tag: a kind, its text, and where it starts.
+struct Tok
+    kind: Int
+    text: Str
+    at: Int
+
+fn k_end() -> Int
+    0
+
+fn k_name() -> Int
+    1
+
+fn k_int() -> Int
+    2
+
+fn k_float() -> Int
+    3
+
+fn k_str() -> Int
+    4
+
+fn k_punct() -> Int
+    5
+
+// The most nested bodies a parse will read, so that a template made of
+// ten thousand opening tags is refused rather than recursed into.
+fn max_nesting() -> Int
+    200
+
+struct P
+    name: Str
+    src: Str
+    n: Int
+    var pos: Int
+    var toks: [Tok]
+    var i: Int
+    var depth: Int
+    // The tag that ended the last body, or empty at the end of the text.
+    var stop: Str
+    var stop_at: Int
+    // Whitespace at the start of the next text is dropped.
+    var trim_next: Bool
+    var parent: Str
+    var parent_at: Int
+    var refs: [Str]
+    var blocks: [Str]
+    var block_ats: [Int]
+    var defs: [teranode.TeraBlockDef]
+    var vars: [Str]
+    var filters: [Str]
+
+// compile reads a template's text.
+pub fn compile(name: Str, src: Str) -> Result<teranode.TeraProgram, teraerror.TeraError> []
+    var p = P { name: name, src: src, n: str.len(src), pos: 0, toks: [], i: 0, depth: 0,
+                stop: "", stop_at: 0, trim_next: false, parent: "", parent_at: 0,
+                refs: [], blocks: [], block_ats: [], defs: [], vars: [], filters: [] }
+    let nodes = parse_body(var p, [])!
+    Ok(teranode.TeraProgram { nodes: nodes, parent: p.parent, parent_at: p.parent_at,
+                              refs: p.refs, block_names: p.blocks, block_ats: p.block_ats, defs: p.defs,
+                              vars: p.vars, filters: p.filters })
+
+// ── Errors ────────────────────────────────────────────────────────────
+
+fn fail(p: P, at: Int, kind: TeraErrorKind) -> teraerror.TeraError
+    teraerror.TeraError { kind: kind, at: teraerror.span_at(p.name, p.src, at), chain: [] }
+
+fn unexpected(p: P, tag: Str, at: Int) -> teraerror.TeraError
+    fail(p, at, ErrorUnexpectedTag(tag))
+
+// A syntax error at the token the parser is looking at.
+fn bad(p: P) -> teraerror.TeraError
+    let t = cur(p)
+    if t.kind == k_end()
+        return fail(p, t.at, ErrorSyntax("the end of the tag"))
+    fail(p, t.at, ErrorSyntax(t.text))
+
+// ── Tokens ────────────────────────────────────────────────────────────
+
+fn is_name_start(b: Int) -> Bool
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z' or b == '_'
+
+fn is_digit(b: Int) -> Bool
+    b >= '0' and b <= '9'
+
+fn is_name_byte(b: Int) -> Bool
+    is_name_start(b) or is_digit(b)
+
+fn is_space(b: Int) -> Bool
+    b == ' ' or b == '\t' or b == '\n' or b == '\r'
+
+// What lexing a tag gives: its tokens, and where its closing delimiter
+// is.  `trim` is set when a dash stood just before the delimiter.
+struct Lexed
+    toks: [Tok]
+    end: Int
+    trim: Bool
+
+// The tokens from `from` up to the delimiter `close`, which is found
+// between tokens, so that one inside a string literal does not end the
+// tag.  A dash right before the delimiter is the whitespace marker and
+// not a token.  `open` is where the tag began, for the error that says
+// it never ended.
+fn lex(p: P, from: Int, close: Str, open: Int) -> Result<Lexed, teraerror.TeraError>
+    var toks: [Tok] = []
+    var i = from
+    let width = str.len(close)
+    while i < p.n
+        let b = str.byte_at_or(p.src, i, 0)
+        if str.slice(p.src, i, i + width) == close
+            list.push(toks, Tok { kind: k_end(), text: "", at: i })
+            return Ok(Lexed { toks: toks, end: i, trim: false })
+        if b == '-' and str.slice(p.src, i + 1, i + 1 + width) == close
+            list.push(toks, Tok { kind: k_end(), text: "", at: i })
+            return Ok(Lexed { toks: toks, end: i + 1, trim: true })
+        if is_space(b)
+            i = i + 1
+        else if is_name_start(b)
+            var j = i
+            while is_name_byte(str.byte_at_or(p.src, j, 0))
+                j = j + 1
+            list.push(toks, Tok { kind: k_name(), text: str.slice(p.src, i, j), at: i })
+            i = j
+        else if is_digit(b)
+            let after_dot = list.len(toks) > 0 and toks[list.len(toks) - 1].text == "."
+            var j = i
+            while is_digit(str.byte_at_or(p.src, j, 0))
+                j = j + 1
+            var kind = k_int()
+            if not after_dot and str.byte_at_or(p.src, j, 0) == '.' and is_digit(str.byte_at_or(p.src, j + 1, 0))
+                j = j + 1
+                while is_digit(str.byte_at_or(p.src, j, 0))
+                    j = j + 1
+                kind = k_float()
+            list.push(toks, Tok { kind: kind, text: str.slice(p.src, i, j), at: i })
+            i = j
+        else if b == '"' or b == '\''
+            let end = string_end(p, i)
+            if end < 0
+                return Err(fail(p, i, ErrorUnclosed("string")))
+            list.push(toks, Tok { kind: k_str(), text: unescape(str.slice(p.src, i + 1, end)), at: i })
+            i = end + 1
+        else
+            let two = str.slice(p.src, i, i + 2)
+            if two == "==" or two == "!=" or two == "<=" or two == ">=" or two == "::"
+                list.push(toks, Tok { kind: k_punct(), text: two, at: i })
+                i = i + 2
+            else if str.contains("()[],.|=<>-", str.slice(p.src, i, i + 1))
+                list.push(toks, Tok { kind: k_punct(), text: str.slice(p.src, i, i + 1), at: i })
+                i = i + 1
+            else
+                return Err(fail(p, i, ErrorSyntax(str.slice(p.src, i, i + 1))))
+    Err(fail(p, open, ErrorUnclosed(str.slice(p.src, open, open + 2))))
+
+// The offset of the quote closing the string that opens at `from`, or -1.
+fn string_end(p: P, from: Int) -> Int
+    let q = str.byte_at_or(p.src, from, 0)
+    var i = from + 1
+    while i < p.n
+        let b = str.byte_at_or(p.src, i, 0)
+        if b == '\\'
+            i = i + 2
+        else if b == q
+            return i
+        else
+            i = i + 1
+    -1
+
+// The characters of a string literal with its backslash escapes read.
+fn unescape(t: Str) -> Str
+    if not str.contains(t, "\\")
+        return t
+    let sb = str.builder_new()
+    var i = 0
+    let n = str.len(t)
+    while i < n
+        let b = str.byte_at_or(t, i, 0)
+        if b == '\\' and i + 1 < n
+            let c = str.byte_at_or(t, i + 1, 0)
+            if c == 'n'
+                str.builder_append_char(sb, '\n')
+            else if c == 't'
+                str.builder_append_char(sb, '\t')
+            else if c == 'r'
+                str.builder_append_char(sb, '\r')
+            else
+                str.builder_append_char(sb, c)
+            i = i + 2
+        else
+            str.builder_append_char(sb, b)
+            i = i + 1
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+fn tok_at(p: P, k: Int) -> Tok
+    if p.i + k < list.len(p.toks)
+        return p.toks[p.i + k]
+    p.toks[list.len(p.toks) - 1]
+
+fn cur(p: P) -> Tok
+    tok_at(p, 0)
+
+fn advance(var p: P)
+    if p.i < list.len(p.toks) - 1
+        p.i = p.i + 1
+
+fn is_punct(p: P, text: Str) -> Bool
+    let t = cur(p)
+    t.kind == k_punct() and t.text == text
+
+fn is_word(p: P, text: Str) -> Bool
+    let t = cur(p)
+    t.kind == k_name() and t.text == text
+
+fn expect_punct(var p: P, text: Str) -> Result<Int, teraerror.TeraError>
+    if not is_punct(p, text)
+        return Err(bad(p))
+    advance(var p)
+    Ok(0)
+
+fn expect_word(var p: P, text: Str) -> Result<Int, teraerror.TeraError>
+    if not is_word(p, text)
+        return Err(bad(p))
+    advance(var p)
+    Ok(0)
+
+fn expect_name(var p: P) -> Result<Str, teraerror.TeraError>
+    let t = cur(p)
+    if t.kind != k_name()
+        return Err(bad(p))
+    advance(var p)
+    Ok(t.text)
+
+// The tag must end here.
+fn expect_end(p: P) -> Result<Int, teraerror.TeraError>
+    if cur(p).kind != k_end()
+        return Err(bad(p))
+    Ok(0)
+
+fn note(var names: [Str], name: Str)
+    if not list.contains(names, name)
+        list.push(names, name)
+
+// ── Expressions ───────────────────────────────────────────────────────
+
+fn parse_expr(var p: P) -> Result<teranode.TeraExpr, teraerror.TeraError>
+    p.depth = p.depth + 1
+    if p.depth > max_nesting()
+        return Err(fail(p, cur(p).at, ErrorLimit("nesting")))
+    var l = parse_and(var p)!
+    while is_word(p, "or")
+        let at = cur(p).at
+        advance(var p)
+        let r = parse_and(var p)!
+        l = ExprBin("or", l, r, at)
+    p.depth = p.depth - 1
+    Ok(l)
+
+fn parse_and(var p: P) -> Result<teranode.TeraExpr, teraerror.TeraError>
+    var l = parse_not(var p)!
+    while is_word(p, "and")
+        let at = cur(p).at
+        advance(var p)
+        let r = parse_not(var p)!
+        l = ExprBin("and", l, r, at)
+    Ok(l)
+
+fn parse_not(var p: P) -> Result<teranode.TeraExpr, teraerror.TeraError>
+    if is_word(p, "not")
+        advance(var p)
+        let x = parse_not(var p)!
+        return Ok(ExprNot(x))
+    parse_cmp(var p)
+
+fn is_cmp_op(p: P) -> Bool
+    let t = cur(p)
+    t.kind == k_punct() and (t.text == "==" or t.text == "!=" or t.text == "<" or t.text == ">" or t.text == "<=" or t.text == ">=")
+
+fn parse_cmp(var p: P) -> Result<teranode.TeraExpr, teraerror.TeraError>
+    var l = parse_filtered(var p)!
+    while true
+        let t = cur(p)
+        if is_cmp_op(p) or is_word(p, "in")
+            advance(var p)
+            let r = parse_filtered(var p)!
+            l = ExprBin(t.text, l, r, t.at)
+        else if is_word(p, "not") and tok_at(p, 1).text == "in"
+            advance(var p)
+            advance(var p)
+            let r = parse_filtered(var p)!
+            l = ExprNot(ExprBin("in", l, r, t.at))
+        else if is_word(p, "is")
+            advance(var p)
+            var negated = false
+            if is_word(p, "not")
+                negated = true
+                advance(var p)
+            let at = cur(p).at
+            let name = expect_name(var p)!
+            let call = parse_args(var p)!
+            l = ExprTest(l, name, call.0, negated, at)
+        else
+            break
+    Ok(l)
+
+fn parse_filtered(var p: P) -> Result<teranode.TeraExpr, teraerror.TeraError>
+    var l = parse_postfix(var p)!
+    while is_punct(p, "|")
+        advance(var p)
+        let at = cur(p).at
+        let name = expect_name(var p)!
+        let call = parse_args(var p)!
+        note(var p.filters, name)
+        l = ExprFilter(l, name, call.0, at)
+    Ok(l)
+
+// An optional parenthesised argument list: the values, and the keyword
+// each was given under, or empty.
+fn parse_args(var p: P) -> Result<([teranode.TeraExpr], [Str]), teraerror.TeraError>
+    var args: [teranode.TeraExpr] = []
+    var names: [Str] = []
+    if not is_punct(p, "(")
+        return Ok((args, names))
+    advance(var p)
+    while not is_punct(p, ")")
+        var kw = ""
+        if cur(p).kind == k_name() and tok_at(p, 1).text == "=" and tok_at(p, 1).kind == k_punct()
+            kw = cur(p).text
+            advance(var p)
+            advance(var p)
+        list.push(args, parse_expr(var p)!)
+        list.push(names, kw)
+        if is_punct(p, ",")
+            advance(var p)
+        else if not is_punct(p, ")")
+            return Err(bad(p))
+    advance(var p)
+    Ok((args, names))
+
+fn parse_postfix(var p: P) -> Result<teranode.TeraExpr, teraerror.TeraError>
+    var l = parse_primary(var p)!
+    while true
+        let at = cur(p).at
+        if is_punct(p, ".")
+            advance(var p)
+            let t = cur(p)
+            if t.kind != k_name() and t.kind != k_int()
+                return Err(bad(p))
+            advance(var p)
+            l = ExprField(l, t.text, at)
+        else if is_punct(p, "[")
+            advance(var p)
+            let key = parse_expr(var p)!
+            expect_punct(var p, "]")!
+            l = ExprIndex(l, key, at)
+        else
+            break
+    Ok(l)
+
+fn parse_primary(var p: P) -> Result<teranode.TeraExpr, teraerror.TeraError>
+    let t = cur(p)
+    if t.kind == k_int()
+        advance(var p)
+        return Ok(ExprLit(ValueInt(str.to_int(t.text) ?? 0)))
+    if t.kind == k_float()
+        advance(var p)
+        return Ok(ExprLit(ValueFloat(str.to_float(t.text) ?? 0.0)))
+    if t.kind == k_str()
+        advance(var p)
+        return Ok(ExprLit(ValueStr(t.text)))
+    if is_punct(p, "-")
+        return parse_negative(var p)
+    if is_punct(p, "(")
+        advance(var p)
+        let inner = parse_expr(var p)!
+        expect_punct(var p, ")")!
+        return Ok(inner)
+    if is_punct(p, "[")
+        return parse_list(var p)
+    if t.kind == k_name()
+        return parse_word(var p)
+    Err(bad(p))
+
+fn parse_negative(var p: P) -> Result<teranode.TeraExpr, teraerror.TeraError>
+    advance(var p)
+    let t = cur(p)
+    if t.kind == k_int()
+        advance(var p)
+        return Ok(ExprLit(ValueInt(0 - (str.to_int(t.text) ?? 0))))
+    if t.kind == k_float()
+        advance(var p)
+        return Ok(ExprLit(ValueFloat(0.0 - (str.to_float(t.text) ?? 0.0))))
+    Err(bad(p))
+
+fn parse_list(var p: P) -> Result<teranode.TeraExpr, teraerror.TeraError>
+    advance(var p)
+    var items: [teranode.TeraExpr] = []
+    while not is_punct(p, "]")
+        list.push(items, parse_expr(var p)!)
+        if is_punct(p, ",")
+            advance(var p)
+        else if not is_punct(p, "]")
+            return Err(bad(p))
+    advance(var p)
+    Ok(ExprList(items))
+
+// A name: a literal word, a macro call in any of its three spellings
+// (`m(..)`, `ns::m(..)`, `ns.m(..)`), or a variable.
+fn parse_word(var p: P) -> Result<teranode.TeraExpr, teraerror.TeraError>
+    let t = cur(p)
+    if t.text == "true" or t.text == "True"
+        advance(var p)
+        return Ok(ExprLit(ValueBool(true)))
+    if t.text == "false" or t.text == "False"
+        advance(var p)
+        return Ok(ExprLit(ValueBool(false)))
+    if t.text == "null" or t.text == "none" or t.text == "None"
+        advance(var p)
+        return Ok(ExprLit(ValueNull))
+    let sep = tok_at(p, 1)
+    if sep.kind == k_punct() and sep.text == "("
+        advance(var p)
+        return parse_call(var p, "", t)
+    let member = tok_at(p, 2)
+    if sep.kind == k_punct() and (sep.text == "::" or sep.text == ".") and member.kind == k_name() and tok_at(p, 3).text == "("
+        advance(var p)
+        advance(var p)
+        advance(var p)
+        return parse_call(var p, t.text, member)
+    advance(var p)
+    note(var p.vars, t.text)
+    Ok(ExprVar(t.text, t.at))
+
+fn parse_call(var p: P, ns: Str, name: Tok) -> Result<teranode.TeraExpr, teraerror.TeraError>
+    let call = parse_args(var p)!
+    Ok(ExprCall(ns, name.text, call.0, call.1, name.at))
+
+// ── Template text ─────────────────────────────────────────────────────
+
+// The offset of the next `{{`, `{%` or `{#` at or after `from`, or -1.
+fn next_open(p: P, from: Int) -> Int
+    var best = -1
+    for open in ["{{", "{%", "{#"]
+        let at = str.index_from(p.src, open, from) ?? -1
+        if at >= 0 and (best < 0 or at < best)
+            best = at
+    best
+
+// The nodes up to the first tag named in `stoppers`, which is left in
+// `p.stop` with its tokens loaded; `p.stop` is empty at the end of the
+// text.
+fn parse_body(var p: P, stoppers: [Str]) -> Result<[teranode.TeraNode], teraerror.TeraError>
+    p.depth = p.depth + 1
+    if p.depth > max_nesting()
+        return Err(fail(p, p.pos, ErrorLimit("nesting")))
+    var nodes: [teranode.TeraNode] = []
+    while p.pos < p.n
+        let open = next_open(p, p.pos)
+        var text = str.slice(p.src, p.pos, p.n)
+        if open >= 0
+            text = str.slice(p.src, p.pos, open)
+        if p.trim_next
+            text = str.trim_start(text)
+            p.trim_next = false
+        if open < 0
+            push_text(var nodes, text)
+            p.pos = p.n
+            break
+        let kind = str.slice(p.src, open + 1, open + 2)
+        var lo = open + 2
+        if str.byte_at_or(p.src, lo, 0) == '-'
+            text = str.trim_end(text)
+            lo = lo + 1
+        push_text(var nodes, text)
+        if kind == "#"
+            let end = str.index_from(p.src, "#}", lo) ?? -1
+            if end < 0
+                return Err(fail(p, open, ErrorUnclosed("{#")))
+            p.trim_next = end > lo and str.byte_at_or(p.src, end - 1, 0) == '-'
+            p.pos = end + 2
+            continue
+        let lexed = lex(p, lo, close_of(kind), open)!
+        p.trim_next = lexed.trim
+        p.pos = lexed.end + 2
+        p.toks = list.clone(lexed.toks)
+        p.i = 0
+        if kind == "{"
+            let e = parse_expr(var p)!
+            expect_end(p)!
+            list.push(nodes, NodeOut(e, open))
+            continue
+        let tag = cur(p).text
+        if cur(p).kind != k_name()
+            return Err(bad(p))
+        advance(var p)
+        if list.contains(stoppers, tag)
+            p.stop = tag
+            p.stop_at = open
+            p.depth = p.depth - 1
+            return Ok(nodes)
+        parse_tag(var p, var nodes, tag, open)!
+    p.stop = ""
+    p.depth = p.depth - 1
+    Ok(nodes)
+
+fn close_of(kind: Str) -> Str
+    if kind == "{"
+        return "}}"
+    "%}"
+
+fn push_text(var nodes: [teranode.TeraNode], text: Str)
+    if str.len(text) > 0
+        list.push(nodes, NodeText(text))
+
+// The body of a tag that opened at `open` and ends at one of `enders`;
+// the end of the text first is an unclosed tag.
+fn body_until(var p: P, tag: Str, open: Int,
+              enders: [Str]) -> Result<[teranode.TeraNode], teraerror.TeraError>
+    let body = parse_body(var p, enders)!
+    if p.stop == ""
+        return Err(fail(p, open, ErrorUnclosed(tag)))
+    Ok(body)
+
+fn parse_tag(var p: P, var nodes: [teranode.TeraNode], tag: Str,
+             open: Int) -> Result<Int, teraerror.TeraError>
+    if tag == "if"
+        list.push(nodes, parse_if(var p, open)!)
+    else if tag == "for"
+        list.push(nodes, parse_for(var p, open)!)
+    else if tag == "set"
+        let name = expect_name(var p)!
+        expect_punct(var p, "=")!
+        let e = parse_expr(var p)!
+        expect_end(p)!
+        list.push(nodes, NodeSet(name, e))
+    else if tag == "include"
+        let e = parse_expr(var p)!
+        expect_end(p)!
+        note_ref(var p, e)
+        list.push(nodes, NodeInclude(e, open))
+    else if tag == "extends"
+        parse_extends(var p, open)!
+    else if tag == "block"
+        list.push(nodes, parse_block(var p, open)!)
+    else if tag == "macro"
+        list.push(nodes, parse_macro(var p, open)!)
+    else if tag == "import"
+        list.push(nodes, parse_import(var p)!)
+    else if tag == "filter"
+        list.push(nodes, parse_filter_block(var p, open)!)
+    else if tag == "raw"
+        expect_end(p)!
+        push_text(var nodes, read_raw(var p, open)!)
+    else if tag == "while"
+        return Err(fail(p, open, ErrorSyntax("while")))
+    else if str.starts_with(tag, "end") or tag == "else" or tag == "elif"
+        return Err(unexpected(p, tag, open))
+    else
+        return Err(fail(p, open, ErrorSyntax(tag)))
+    Ok(0)
+
+// A name an `include` gives literally is a reference; a computed one is
+// known only when the template is rendered.
+fn note_ref(var p: P, e: teranode.TeraExpr)
+    let name = literal_name(e)
+    if name != ""
+        note(var p.refs, name)
+
+fn literal_name(e: teranode.TeraExpr) -> Str
+    match e
+        ExprLit(ValueStr(name)) =>
+            name
+        _                       =>
+            ""
+
+fn parse_if(var p: P, open: Int) -> Result<teranode.TeraNode, teraerror.TeraError>
+    var arms: [teranode.TeraBranch] = []
+    var other: [teranode.TeraNode] = []
+    var cond = parse_expr(var p)!
+    expect_end(p)!
+    while true
+        let body = body_until(var p, "if", open, ["elif", "else", "endif"])!
+        list.push(arms, teranode.TeraBranch { cond: cond, body: body })
+        if p.stop == "elif"
+            cond = parse_expr(var p)!
+            expect_end(p)!
+        else if p.stop == "else"
+            expect_end(p)!
+            other = body_until(var p, "if", open, ["endif"])!
+            expect_end(p)!
+            break
+        else
+            expect_end(p)!
+            break
+    Ok(NodeIf(arms, other))
+
+fn parse_for(var p: P, open: Int) -> Result<teranode.TeraNode, teraerror.TeraError>
+    let at = cur(p).at
+    var key = ""
+    var value = expect_name(var p)!
+    if is_punct(p, ",")
+        advance(var p)
+        key = value
+        value = expect_name(var p)!
+    expect_word(var p, "in")!
+    let source = parse_expr(var p)!
+    expect_end(p)!
+    let body = body_until(var p, "for", open, ["else", "endfor"])!
+    var other: [teranode.TeraNode] = []
+    if p.stop == "else"
+        expect_end(p)!
+        other = body_until(var p, "for", open, ["endfor"])!
+    expect_end(p)!
+    Ok(NodeFor(key, value, source, body, other, at))
+
+fn parse_extends(var p: P, open: Int) -> Result<Int, teraerror.TeraError>
+    let t = cur(p)
+    if t.kind != k_str() or p.depth != 1
+        return Err(bad(p))
+    advance(var p)
+    expect_end(p)!
+    p.parent = t.text
+    p.parent_at = open
+    note(var p.refs, t.text)
+    Ok(0)
+
+fn parse_block(var p: P, open: Int) -> Result<teranode.TeraNode, teraerror.TeraError>
+    let name = expect_name(var p)!
+    expect_end(p)!
+    if list.contains(p.blocks, name)
+        return Err(fail(p, open, ErrorDuplicateBlock(name)))
+    list.push(p.blocks, name)
+    list.push(p.block_ats, open)
+    let body = body_until(var p, "block", open, ["endblock"])!
+    if cur(p).kind == k_name() and cur(p).text != name
+        return Err(bad(p))
+    if cur(p).kind == k_name()
+        advance(var p)
+    expect_end(p)!
+    list.push(p.defs, teranode.TeraBlockDef { name: name, body: body, at: open })
+    Ok(NodeBlock(name, body, open))
+
+fn parse_macro(var p: P, open: Int) -> Result<teranode.TeraNode, teraerror.TeraError>
+    let name = expect_name(var p)!
+    expect_punct(var p, "(")!
+    var params: [teranode.TeraParam] = []
+    while not is_punct(p, ")")
+        let pname = expect_name(var p)!
+        var param = teranode.TeraParam { name: pname, has_default: false, default: ExprLit(ValueNull) }
+        if is_punct(p, "=")
+            advance(var p)
+            param = teranode.TeraParam { name: pname, has_default: true, default: parse_expr(var p)! }
+        list.push(params, param)
+        if is_punct(p, ",")
+            advance(var p)
+        else if not is_punct(p, ")")
+            return Err(bad(p))
+    advance(var p)
+    expect_end(p)!
+    let body = body_until(var p, "macro", open, ["endmacro"])!
+    expect_end(p)!
+    Ok(NodeMacro(name, params, body))
+
+fn parse_import(var p: P) -> Result<teranode.TeraNode, teraerror.TeraError>
+    let file = cur(p)
+    if file.kind != k_str()
+        return Err(bad(p))
+    advance(var p)
+    expect_word(var p, "as")!
+    let space = expect_name(var p)!
+    expect_end(p)!
+    note(var p.refs, file.text)
+    Ok(NodeImport(file.text, space))
+
+fn parse_filter_block(var p: P, open: Int) -> Result<teranode.TeraNode, teraerror.TeraError>
+    let at = cur(p).at
+    let name = expect_name(var p)!
+    let call = parse_args(var p)!
+    expect_end(p)!
+    note(var p.filters, name)
+    let body = body_until(var p, "filter", open, ["endfilter"])!
+    expect_end(p)!
+    Ok(NodeFilter(name, call.0, body, at))
+
+fn strip_dashes(t: Str) -> Str
+    var out = t
+    if str.starts_with(out, "-")
+        out = str.slice(out, 1, str.len(out))
+    if str.ends_with(out, "-")
+        out = str.slice(out, 0, str.len(out) - 1)
+    out
+
+// The text up to `{% endraw %}`, which is consumed.
+fn read_raw(var p: P, open: Int) -> Result<Str, teraerror.TeraError>
+    let at = raw_end(p, p.pos)
+    if at < 0
+        return Err(fail(p, open, ErrorUnclosed("raw")))
+    let end = str.index_from(p.src, "%}", at) ?? at
+    let inner = str.slice(p.src, at + 2, end)
+    var text = str.slice(p.src, p.pos, at)
+    if p.trim_next
+        text = str.trim_start(text)
+    if str.starts_with(inner, "-")
+        text = str.trim_end(text)
+    p.trim_next = str.ends_with(inner, "-")
+    p.pos = end + 2
+    Ok(text)
+
+// The offset of the `{% endraw %}` tag at or after `from`, or -1.
+fn raw_end(p: P, from: Int) -> Int
+    var at = str.index_from(p.src, "{%", from) ?? -1
+    while at >= 0
+        let end = str.index_from(p.src, "%}", at) ?? -1
+        if end < 0
+            return -1
+        if str.trim(strip_dashes(str.slice(p.src, at + 2, end))) == "endraw"
+            return at
+        at = str.index_from(p.src, "{%", at + 2) ?? -1
+    -1

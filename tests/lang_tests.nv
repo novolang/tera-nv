@@ -1,0 +1,368 @@
+// lang_tests.nv — the parts of the language Jinja2 cannot judge.
+//
+// Where Tera and Jinja2 differ, or only Tera has the construct, the
+// rule is Tera's as the interface documents it, and the expected text
+// below is derived from that rule by hand.  The rule sits in the
+// comment above each group so a reviewer can check the derivation
+// without running anything.  Constructs the two languages share are
+// tested against Jinja2 in `oracle_tests.nv`.
+
+use std.test
+use std.list
+use std.str
+use teraval
+use teraparse
+use teraerror
+use terafilter
+use terarender
+
+fn pair(k: Str, v: teraval.TeraValue) -> teraval.TeraPair
+    teraval.TeraPair { key: k, value: v }
+
+fn ctx_of(pairs: [teraval.TeraPair]) -> teraval.TeraContext
+    teraval.TeraContext { pairs: pairs }
+
+fn set_of(files: [teraerror.TeraSource]) -> teraparse.TeraSet [io]
+    var s = teraparse.set_new()
+    for f in files
+        match teraparse.set_add(s, f.name, f.text)
+            Ok(next) =>
+                s = next
+            Err(_)   =>
+                continue
+    s
+
+fn src(name: Str, text: Str) -> teraerror.TeraSource
+    teraerror.TeraSource { name: name, text: text }
+
+// The text of a render of one template.
+fn out(text: Str, ctx: teraval.TeraContext) -> Str [io]
+    match terarender.render_one(text, ctx)
+        Ok(t)  => t
+        Err(e) => "ERROR " + teraerror.one_line(e)
+
+fn out_in(files: [teraerror.TeraSource], name: Str, ctx: teraval.TeraContext) -> Str [io]
+    match terarender.render_str(set_of(files), name, ctx)
+        Ok(t)  => t
+        Err(e) => "ERROR " + teraerror.one_line(e)
+
+fn none() -> teraval.TeraContext
+    teraval.context_new()
+
+@test
+fn test_for_over_a_map_a_list_and_a_string() [io]
+    let m = ValueMap([pair("b", ValueInt(1)), pair("a", ValueInt(2))])
+    let xs = ValueList([ValueStr("x"), ValueStr("y")])
+
+    test.case("rule: a map iterates in insertion order; two names are key and value")
+    test.assert(out("{% for k, v in m %}{{ k }}={{ v }};{% endfor %}", ctx_of([pair("m", m)])) == "b=1;a=2;")
+
+    test.case("rule: one name over a map is the key")
+    test.assert(out("{% for k in m %}{{ k }}{% endfor %}", ctx_of([pair("m", m)])) == "ba")
+
+    test.case("rule: two names over a list are the index from 0 and the item")
+    test.assert(out("{% for i, x in xs %}{{ i }}{{ x }}{% endfor %}", ctx_of([pair("xs", xs)])) == "0x1y")
+
+    test.case("rule: a string iterates by characters, two names give the position")
+    test.assert(out("{% for i, c in s %}{{ i }}{{ c }}{% endfor %}", ctx_of([pair("s", ValueStr("hé"))])) == "0h1é")
+
+    test.case("rule: loop.length and loop.last count the whole collection")
+    test.assert(out("{% for k, v in m %}{{ loop.index }}/{{ loop.length }}{% if loop.last %}!{% endif %} {% endfor %}",
+                    ctx_of([pair("m", m)])) == "1/2 2/2! ")
+
+    test.case("rule: only a list, a map or a string can be iterated")
+    test.assert(str_has(out("{% for x in n %}{% endfor %}", ctx_of([pair("n", ValueInt(1))])),
+                        "wanted a list, a map or a string, got int"))
+
+fn str_has(text: Str, part: Str) -> Bool
+    str.contains(text, part)
+
+@test
+fn test_values_and_literals() [io]
+    test.case("rule: true, True, false, False, null, none and None are literals")
+    test.assert(out("{% if true and True %}t{% endif %}{% if false or False %}f{% endif %}", none()) == "t")
+    test.assert(out("[{{ null }}][{{ none }}][{{ None }}]", none()) == "[][][]")
+
+    test.case("rule: and and or answer a bool, not one of their operands")
+    test.assert(out("{{ a and b }}|{{ a or b }}", ctx_of([pair("a", ValueStr("x")), pair("b", ValueStr("y"))])) == "true|true")
+
+    test.case("rule: a bool renders as true or false, a float with a point, null as nothing")
+    test.assert(out("{{ b }} {{ f }} {{ n }}.", ctx_of([pair("b", ValueBool(false)), pair("f", ValueFloat(2.0)),
+                                                      pair("n", ValueNull)])) == "false 2.0 .")
+
+    test.case("rule: a list or a map renders as its JSON")
+    test.assert(out("{{ xs }} {{ m }}", ctx_of([pair("xs", ValueList([ValueInt(1)])),
+                                               pair("m", ValueMap([pair("a", ValueNull)]))]))
+                == "[1] {&quot;a&quot;:null}")
+
+    test.case("rule: a map takes an int key as its text, and a list an index from a variable")
+    test.assert(out("{{ m[1] }}{{ xs[i] }}", ctx_of([pair("m", ValueMap([pair("1", ValueStr("one"))])),
+                                                    pair("xs", ValueList([ValueStr("a"), ValueStr("b")])),
+                                                    pair("i", ValueInt(1))])) == "oneb")
+
+    test.case("rule: a float literal, a negative float and escapes in a string")
+    test.assert(out("{{ 1.25 }} {{ -2.5 }} {{ 'a\\nb\\tc\\\\d\\re' }}", none()) == "1.25 -2.5 a\nb\tc\\d\re")
+
+    test.case("rule: in needs a list, a string or a map on its right")
+    test.assert(str_has(out("{% if 1 in n %}{% endif %}", ctx_of([pair("n", ValueInt(5))])),
+        "wanted a list, a string or a map, got int"))
+
+    test.case("rule: a literal list can be indexed and a negative number written")
+    test.assert(out("{% set xs = [1, -2, 3.5, 'a'] %}{{ xs.1 }}{{ xs[3] }}", none()) == "-2a")
+
+@test
+fn test_defined_default_and_the_lenient_paths() [io]
+    let u = ValueMap([pair("name", ValueStr("n"))])
+
+    test.case("rule: a name or a field that is not there is an error, except under defined and default")
+    test.assert(str_has(out("{{ nope }}", none()), "unknown variable `nope`"))
+    test.assert(str_has(out("{{ u.nope }}", ctx_of([pair("u", u)])), "no such field `u.nope`"))
+    test.assert(str_has(out("{{ u.name.x }}", ctx_of([pair("u", u)])), "no such field `u.name.x`"))
+    test.assert(str_has(out("{{ u[k] }}", ctx_of([pair("u", u)])), "unknown variable `k`"))
+    test.assert(str_has(out("{{ u['zz'] }}", ctx_of([pair("u", u)])), "no such field `u.zz`"))
+    test.assert(str_has(out("{{ u[k2] }}", ctx_of([pair("u", u), pair("k2", ValueStr("q"))])), "no such field `u.q`"))
+
+    test.case("rule: the path in a message spells a literal key as a field and another key in brackets")
+    let deep = ValueMap([pair("a", u), pair("k", ValueStr("a"))])
+    test.assert(str_has(out("{{ d['a'].x }}", ctx_of([pair("d", deep)])), "no such field `d.a.x`"))
+    test.assert(str_has(out("{{ d[k].x }}", ctx_of([pair("d", deep), pair("k", ValueStr("a"))])),
+        "no such field `d[k].x`"))
+    test.assert(str_has(out("{{ [1].x }}", none()), "no such field `(value).x`"))
+
+    test.case("rule: a deep path under defined or default is false or the default, and does not fail")
+    test.assert(out("{% if a.b.c is defined %}t{% else %}f{% endif %}", none()) == "f")
+    test.assert(out("{% if u.x.y is defined %}t{% else %}f{% endif %}", ctx_of([pair("u", u)])) == "f")
+    test.assert(out("{% if u[k] is defined %}t{% else %}f{% endif %}", ctx_of([pair("u", u)])) == "f")
+    test.assert(out("{% if q[k] is defined %}t{% else %}f{% endif %}", none()) == "f")
+    test.assert(out("{% if u[k] is defined %}t{% else %}f{% endif %}",
+                    ctx_of([pair("u", u), pair("k", ValueStr("name"))])) == "t")
+    test.assert(out("{{ a.b | default('d') }}", none()) == "d")
+    test.assert(out("{{ u.name | default('d') }}", ctx_of([pair("u", u)])) == "n")
+
+    test.case("rule: null is defined, and default replaces it")
+    test.assert(out("{% if x is defined %}t{% else %}f{% endif %}", ctx_of([pair("x", ValueNull)])) == "t")
+    test.assert(out("{% if x is null %}t{% else %}f{% endif %}", ctx_of([pair("x", ValueNull)])) == "t")
+    test.assert(out("{{ x | default('d') }}", ctx_of([pair("x", ValueNull)])) == "d")
+
+    test.case("rule: default on an expression that is not a path evaluates it")
+    test.assert(out("{{ 'a' | default('d') }}", none()) == "a")
+
+    test.case("rule: is not flips the answer, and any other test needs the name to exist")
+    test.assert(out("{% if x is not odd %}t{% else %}f{% endif %}", ctx_of([pair("x", ValueInt(2))])) == "t")
+    test.assert(str_has(out("{% if q is odd %}t{% endif %}", none()), "unknown variable `q`"))
+
+    test.case("rule: matching, containing, starting_with and ending_with are tests")
+    test.assert(out("{% if s is matching('^a') %}1{% endif %}{% if s is containing('b') %}2{% endif %}"
+                    + "{% if s is starting_with('a') %}3{% endif %}{% if s is ending_with('c') %}4{% endif %}",
+                    ctx_of([pair("s", ValueStr("abc"))])) == "1234")
+
+    test.case("rule: a test that refuses its subject is an error at the test")
+    test.assert(str_has(out("{% if s is odd %}x{% endif %}", ctx_of([pair("s", ValueStr("a"))])),
+        "filter `odd` wanted an int"))
+
+@test
+fn test_filters_in_templates() [io]
+    test.case("rule: arguments may be named, and are taken in the order written")
+    test.assert(out("{{ 'abcdef' | truncate(length=3) }}", none()) == "abc")
+    test.assert(out("{{ xs | join(sep='-') }}", ctx_of([pair("xs", ValueList([ValueInt(1), ValueInt(2)]))])) == "1-2")
+
+    test.case("rule: an unknown filter suggests the nearest registered name, within two edits")
+    test.assert(str_has(out("{{ 1 | upperr }}", none()), "did you mean `upper`"))
+    test.assert(not str_has(out("{{ 1 | zzzzzzzz }}", none()), "did you mean"))
+    test.assert(str_has(out("{% if 1 is oddd %}{% endif %}", none()), "did you mean `odd`"))
+
+    test.case("rule: a filter block applies the filter to the rendered body")
+    test.assert(out("{% filter upper %}a{{ x }}b{% endfilter %}", ctx_of([pair("x", ValueStr("<"))])) == "A&LT;B")
+    test.assert(out("{% filter replace('a', 'o') %}banana{% endfilter %}", none()) == "bonono")
+    test.assert(str_has(out("{% filter nope %}a{% endfilter %}", none()), "unknown filter"))
+
+    test.case("rule: a filter that refuses its input is reported at the filter, with its name")
+    test.assert(str_has(out("{{ 1 | upper }}", none()), "filter `upper` wanted a string, got int"))
+
+    test.case("rule: escape, escape_xml and safe anywhere in the chain turn autoescaping off")
+    test.assert(out("{{ '<' | escape | upper }}", none()) == "&LT;")
+    test.assert(out("{{ \"'\" | escape_xml }}", none()) == "&apos;")
+    test.assert(out("{{ '<' | upper | safe }}", none()) == "<")
+
+    test.case("rule: a registry without safe makes safe an unknown filter")
+    let strict = terafilter.without_filter(terafilter.builtin_filters(), "safe")
+    match teraparse.set_add(teraparse.set_new(), "p.html", "{{ x | safe }}")
+        Err(_)  => test.assert(false)
+        Ok(set) =>
+            match terarender.render([], set, "p.html", ctx_of([pair("x", ValueStr("<"))]), strict,
+                                    terafilter.builtin_tests())
+                Ok(_)  => test.assert(false)
+                Err(e) =>
+                    match e.kind
+                        ErrorUnknownFilter(name, _) => test.assert(name == "safe")
+                        _                           => test.assert(false)
+
+@test
+fn test_macros_follow_teras_rules() [io]
+    test.case("rule: a macro sees its arguments and nothing of the caller's variables")
+    test.assert(str_has(out("{% macro m() %}{{ x }}{% endmacro %}{{ m() }}", ctx_of([pair("x", ValueInt(1))])),
+                        "unknown variable `x`"))
+
+    test.case("rule: a macro is called by its name, by self::name, or by alias::name")
+    let files = [src("p.html", "{% import 'm.html' as m %}{{ m::hi('a') }}{{ self::own() }}{{ own() }}"
+                                 + "{% macro own() %}o{% endmacro %}"),
+                 src("m.html", "{% macro hi(n) %}hi {{ n }}{% endmacro %}")]
+    test.assert(out_in(files, "p.html", none()) == "hi aoo")
+
+    test.case("rule: positional arguments, then a keyword argument; a default fills what is left")
+    test.assert(out("{% macro m(a, b='B', c='C') %}{{ a }}{{ b }}{{ c }}{% endmacro %}{{ m('A', c='z') }}", none()) == "ABz")
+
+    test.case("rule: a default may use an earlier argument")
+    test.assert(out("{% macro m(a, b=a) %}{{ a }}{{ b }}{% endmacro %}{{ m('A') }}", none()) == "AA")
+
+    test.case("rule: too many arguments, an unknown keyword, or a missing argument is an error")
+    test.assert(str_has(out("{% macro m(a) %}{% endmacro %}{{ m(1, 2) }}", none()), "1 arguments at most, got 2"))
+    test.assert(str_has(out("{% macro m(a) %}{% endmacro %}{{ m(z=1) }}", none()), "no argument named `z`"))
+    test.assert(str_has(out("{% macro m(a) %}{% endmacro %}{{ m() }}", none()), "unknown variable `a`"))
+
+    test.case("rule: a name that is not a macro, or an alias not imported, is an error")
+    test.assert(str_has(out("{{ nope() }}", none()), "no such field `nope`"))
+    test.assert(str_has(out("{{ q::nope() }}", none()), "unknown variable `q`"))
+
+    test.case("rule: a macro's output is markup, a macro called from a filter chain keeps that")
+    test.assert(out("{% macro m() %}<i>{% endmacro %}{{ m() }}", none()) == "<i>")
+
+    test.case("rule: an error inside a macro names the macro in the chain")
+    match terarender.render_str(set_of([src("p.html", "{% macro m() %}{{ nope }}{% endmacro %}\n{{ m() }}")]),
+                                "p.html", none())
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            test.assert(list.len(e.chain) == 1)
+            test.assert(e.chain[0].how == FrameMacro("m"))
+            test.assert(e.chain[0].at.line == 2)
+
+@test
+fn test_includes_and_inheritance_edges() [io]
+    test.case("rule: an included template shares the loop and the set variables of the includer")
+    test.assert(out_in([src("p.html", "{% for x in xs %}{% include 'q.html' %}{% endfor %}"),
+                        src("q.html", "{{ loop.index }}{{ x }}")],
+                        "p.html",
+                       ctx_of([pair("xs", ValueList([ValueStr("a"), ValueStr("b")]))])) == "1a2b")
+
+    test.case("rule: a name that is not a string cannot name a template")
+    test.assert(str_has(out("{% include n %}", ctx_of([pair("n", ValueInt(1))])), "wanted a template name, got int"))
+
+    test.case("rule: a template that includes the one that includes it is a cycle")
+    let each_other = [src("a.html", "{% include 'b.html' %}"), src("b.html", "{% include 'a.html' %}")]
+    test.assert(str_has(out_in(each_other, "a.html", none()), "`a.html` includes or extends itself"))
+
+    test.case("rule: render_one has no set, so an include is a missing template")
+    test.assert(str_has(out("{% include 'x.html' %}", none()), "template `x.html` is not in the set"))
+
+    test.case("rule: a parent the set does not hold is reported at the extends tag with the host's remedy")
+    match terarender.render_str(set_of([src("c.html", "\n{% extends 'gone.html' %}")]), "c.html", none())
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            test.assert(terarender.missing(e) == Some("gone.html"))
+            test.assert(e.at.line == 2)
+            test.assert(e.at.template == "c.html")
+
+    test.case("rule: a cycle of parents found while rendering is an error, not a loop")
+    let cyc = [src("a.html", "{% extends 'b.html' %}"), src("b.html", "{% extends 'a.html' %}")]
+    test.assert(str_has(out_in(cyc, "a.html", none()), "includes or extends itself"))
+
+    test.case("rule: super() outside a block, and super() with no parent block, are errors")
+    test.assert(str_has(out("{{ super() }}", none()), "no such field `super()`"))
+    test.assert(str_has(out("{% block a %}{{ super() }}{% endblock %}", none()), "no such field `super()`"))
+
+    test.case("rule: a block a child overrides is framed in the error chain")
+    match terarender.render_str(set_of([src("b.html", "[{% block c %}{% endblock %}]"),
+                                        src("p.html", "{% extends 'b.html' %}\n{% block c %}{{ nope }}{% endblock %}")]),
+                                "p.html", none())
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            test.assert(e.at.template == "p.html")
+            test.assert(e.chain[0].how == FrameBlock("c"))
+            test.assert(e.chain[0].at.line == 2)
+            test.assert(e.chain[1].how == FrameExtends)
+
+    test.case("rule: the templates a render used are listed once each, in the order reached")
+    match terarender.render([], set_of([src("p.html", "{% extends 'b.html' %}"),
+                                        src("b.html", "{% include 'n.html' %}{% include 'n.html' %}"),
+                                        src("n.html", "")]),
+                                        "p.html", none(),
+                            terafilter.builtin_filters(), terafilter.builtin_tests())
+        Err(_) => test.assert(false)
+        Ok(r)  => test.assert(r.used == ["p.html", "b.html", "n.html"])
+
+@test
+fn test_render_block_and_the_other_entry_points() [io]
+    let files = [src("b.html", "<{% block c %}base{% endblock %}>"),
+                 src("p.html", "{% extends 'b.html' %}{% block c %}{{ super() }}+{{ t }}{% endblock %}")]
+    let set = set_of(files)
+    let ctx = ctx_of([pair("t", ValueStr("T"))])
+
+    test.case("rule: render_block renders one block of the most derived template, super included")
+    match terarender.render_block([], set, "p.html", "c", ctx, terafilter.builtin_filters(), terafilter.builtin_tests())
+        Err(_) => test.assert(false)
+        Ok(r)  => test.assert(r.out == [98, 97, 115, 101, 43, 84])
+
+    test.case("rule: a block the template does not have is an error")
+    match terarender.render_block([], set, "p.html", "zz", ctx, terafilter.builtin_filters(), terafilter.builtin_tests())
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            match e.kind
+                ErrorNoSuchField(p) => test.assert(p == "block zz")
+                _                   => test.assert(false)
+
+    test.case("rule: a template the set does not hold is a missing template at line 1")
+    match terarender.render([], set, "nope.html", ctx, terafilter.builtin_filters(), terafilter.builtin_tests())
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            test.assert(terarender.missing(e) == Some("nope.html"))
+            test.assert(e.at.line == 1)
+
+    test.case("rule: render appends to the caller's bytes")
+    match terarender.render([65], set, "b.html", ctx, terafilter.builtin_filters(), terafilter.builtin_tests())
+        Err(_) => test.assert(false)
+        Ok(r)  => test.assert(r.out == [65, 60, 98, 97, 115, 101, 62])
+
+    test.case("rule: loop_variable_names are the five a loop sets")
+    test.assert(terarender.loop_variable_names() == ["loop.index", "loop.index0", "loop.first", "loop.last",
+                                                     "loop.length"])
+
+@test
+fn test_the_three_limits() [io]
+    let big = ValueList([ValueInt(1), ValueInt(2), ValueInt(3)])
+    let ctx = ctx_of([pair("xs", big)])
+
+    test.case("rule: more loop iterations than max_iterations is an error, counted across loops")
+    let tight = TeraLimits { max_depth: 32, max_iterations: 4, max_output: 1000 }
+    test.assert(limited("{% for x in xs %}{% endfor %}{% for x in xs %}{% endfor %}", ctx, tight) == "iterations")
+    test.assert(limited("{% for x in xs %}{% endfor %}", ctx, tight) == "ok")
+
+    test.case("rule: more output than max_output is an error, for text and for an expression")
+    let small = TeraLimits { max_depth: 32, max_iterations: 100, max_output: 5 }
+    test.assert(limited("abcdef", ctx, small) == "output")
+    test.assert(limited("{{ 'abcdef' }}", ctx, small) == "output")
+    test.assert(limited("abcde", ctx, small) == "ok")
+
+    test.case("rule: includes and extends nest at most max_depth deep")
+    let shallow = TeraLimits { max_depth: 1, max_iterations: 100, max_output: 1000 }
+    let files = [src("a.html", "{% include 'b.html' %}"), src("b.html", "{% include 'c.html' %}"),
+                 src("c.html", "c")]
+    match terarender.render_with([], set_of(files), "a.html", none(), terafilter.builtin_filters(),
+                                 terafilter.builtin_tests(), shallow)
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            match e.kind
+                ErrorLimit(what) => test.assert(what == "depth")
+                _                => test.assert(false)
+    match terarender.render_with([], set_of([src("a.html", "{% include 'c.html' %}"), src("c.html", "c")]),
+                                 "a.html", none(), terafilter.builtin_filters(), terafilter.builtin_tests(), shallow)
+        Ok(r)  => test.assert(r.out == [99])
+        Err(_) => test.assert(false)
+
+fn limited(text: Str, ctx: teraval.TeraContext, limits: TeraLimits) -> Str [io]
+    match terarender.render_with([], set_of([src("p.html", text)]), "p.html", ctx, terafilter.builtin_filters(),
+                                 terafilter.builtin_tests(), limits)
+        Ok(_)  => "ok"
+        Err(e) =>
+            match e.kind
+                ErrorLimit(what) => what
+                _                => "other"

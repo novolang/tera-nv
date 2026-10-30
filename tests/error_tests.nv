@@ -1,0 +1,158 @@
+// error_tests.nv — how errors read, and the small public helpers.
+//
+// Every expected string is written out in full and derived from the
+// format in the doc comments of `teraerror`: the message, then the
+// position, the numbered source line with a caret under the name, and
+// one line per frame of the chain, innermost first.
+
+use std.test
+use std.str
+use teraerror
+use teraparse
+use teraval
+use terarender
+use terafilter
+
+fn span(template: Str, line: Int, column: Int) -> teraerror.TeraSpan
+    teraerror.TeraSpan { template: template, line: line, column: column, offset: 0 }
+
+fn error_of(kind: TeraErrorKind) -> teraerror.TeraError
+    teraerror.TeraError { kind: kind, at: span("t.html", 3, 5), chain: [] }
+
+@test
+fn test_every_kind_has_a_message() [io]
+    test.case("rule: the message says what happened in the words of the kind's doc comment")
+    test.assert(error_of(ErrorSyntax("@")).message() == "syntax error at `@`")
+    test.assert(error_of(ErrorUnclosed("for")).message() == "`for` is never closed")
+    test.assert(error_of(ErrorUnexpectedTag("endif")).message() == "unexpected `endif`")
+    test.assert(error_of(ErrorUnknownVariable("x")).message() == "unknown variable `x`")
+    test.assert(error_of(ErrorNoSuchField("u.x")).message() == "no such field `u.x`")
+    test.assert(error_of(ErrorUnknownFilter("uppr", "upper")).message()
+                == "unknown filter or test `uppr`, did you mean `upper`")
+    test.assert(error_of(ErrorUnknownFilter("zzz", "")).message() == "unknown filter or test `zzz`")
+    test.assert(error_of(ErrorFilterRefused("upper", "a string, got int")).message()
+                == "filter `upper` wanted a string, got int")
+    test.assert(error_of(ErrorTemplateNotFound("a.html")).message() == "template `a.html` is not in the set")
+    test.assert(error_of(ErrorCycle("a.html")).message() == "`a.html` includes or extends itself")
+    test.assert(error_of(ErrorDuplicateBlock("b")).message() == "block `b` is defined twice")
+    test.assert(error_of(ErrorLimit("depth")).message() == "the depth limit was reached")
+
+@test
+fn test_one_line_and_missing_template() [io]
+    test.case("rule: one_line is template:line:column: message")
+    test.assert(teraerror.one_line(error_of(ErrorUnknownVariable("x"))) == "t.html:3:5: unknown variable `x`")
+
+    test.case("rule: missing_template answers only for ErrorTemplateNotFound")
+    test.assert(teraerror.missing_template(error_of(ErrorTemplateNotFound("a.html"))) == Some("a.html"))
+    test.assert(teraerror.missing_template(error_of(ErrorCycle("a.html"))) == None)
+
+@test
+fn test_report_shows_the_line_a_caret_and_the_chain() [io]
+    let nav = "<nav>\n  <a href=\"/u/{{ user.nmae }}\">\n</nav>"
+    let sources = [teraerror.TeraSource { name: "nav.html", text: nav }]
+    let chain = [teraerror.TeraFrame { at: span("header.html", 12, 1), how: FrameInclude },
+                 teraerror.TeraFrame { at: span("base.html", 3, 1), how: FrameExtends },
+                 teraerror.TeraFrame { at: span("page.html", 8, 1), how: FrameBlock("content") },
+                 teraerror.TeraFrame { at: span("page.html", 9, 1), how: FrameMacro("card") }]
+    let e = teraerror.TeraError { kind: ErrorNoSuchField("user.nmae"),
+        at: span("nav.html", 2, 18),
+        chain: chain }
+
+    test.case("rule: message, position, numbered line, caret under the word, then each frame")
+    test.assert(teraerror.report(e, sources)
+                == "no such field `user.nmae` in `nav.html`, line 2\n"
+                + "  2 |   <a href=\"/u/{{ user.nmae }}\">\n"
+                + "    | " + str.repeat(" ", 17) + "^^^^^^^^^\n"
+                + "  included from `header.html`, line 12\n"
+                + "  extended from `base.html`, line 3\n"
+                + "  in block `content` of `page.html`, line 8\n"
+                + "  in macro `card`, called from `page.html`, line 9")
+
+    test.case("rule: a number takes more gutter, and a caret over a character that is no word is one wide")
+    let long = "x\n\n\n\n\n\n\n\n\n(\n"
+    let at10 = teraerror.TeraError { kind: ErrorSyntax("("), at: span("p.html", 10, 1), chain: [] }
+    test.assert(teraerror.report(at10, [teraerror.TeraSource { name: "p.html", text: long }])
+                == "syntax error at `(` in `p.html`, line 10\n  10 | (\n     | ^")
+
+    test.case("rule: with no source for the template, or a line the source lacks, the excerpt is left out")
+    test.assert(teraerror.report(e, []) == "no such field `user.nmae` in `nav.html`, line 2\n"
+                + "  included from `header.html`, line 12\n"
+                + "  extended from `base.html`, line 3\n"
+                + "  in block `content` of `page.html`, line 8\n"
+                + "  in macro `card`, called from `page.html`, line 9")
+    let past = teraerror.TeraError { kind: ErrorLimit("output"), at: span("p.html", 9, 1), chain: [] }
+    test.assert(teraerror.report(past, [teraerror.TeraSource { name: "p.html", text: "a" }])
+                == "the output limit was reached in `p.html`, line 9")
+    let zero = teraerror.TeraError { kind: ErrorLimit("output"), at: span("p.html", 0, 1), chain: [] }
+    test.assert(teraerror.report(zero, [teraerror.TeraSource { name: "p.html", text: "a" }])
+                == "the output limit was reached in `p.html`, line 0")
+
+@test
+fn test_span_at_counts_lines_and_columns_from_one() [io]
+    let text = "ab\ncd\n"
+
+    test.case("rule: offset 0 is line 1, column 1; after a newline the column starts again")
+    test.assert(teraerror.span_at("t", text, 0).line == 1)
+    test.assert(teraerror.span_at("t", text, 0).column == 1)
+    test.assert(teraerror.span_at("t", text, 1).column == 2)
+    test.assert(teraerror.span_at("t", text, 3).line == 2)
+    test.assert(teraerror.span_at("t", text, 3).column == 1)
+    test.assert(teraerror.span_at("t", text, 4).column == 2)
+
+    test.case("rule: an offset past the end counts on from the last line")
+    test.assert(teraerror.span_at("t", text, 99).line == 3)
+    test.assert(teraerror.span_at("t", text, 99).offset == 99)
+
+@test
+fn test_nearest_finds_a_name_within_two_edits() [io]
+    let names = ["upper", "lower", "length", "title"]
+
+    test.case("rule: one change, one missing letter, one extra letter, two changes")
+    test.assert(teraerror.nearest("uppar", names) == "upper")
+    test.assert(teraerror.nearest("uper", names) == "upper")
+    test.assert(teraerror.nearest("upperr", names) == "upper")
+    test.assert(teraerror.nearest("uppar", names) == "upper")
+    test.assert(teraerror.nearest("lowxx", names) == "lower")
+
+    test.case("rule: three edits away is a different word, and an exact name is itself")
+    test.assert(teraerror.nearest("xyzzy", names) == "")
+    test.assert(teraerror.nearest("title", names) == "title")
+    test.assert(teraerror.nearest("a", []) == "")
+
+    test.case("rule: of two equally near names the first listed wins")
+    test.assert(teraerror.nearest("lengtx", ["length", "lengty"]) == "length")
+
+@test
+fn test_errors_from_a_render_carry_their_position() [io]
+    test.case("rule: an unknown variable is at the variable, on its line and column")
+    match terarender.render_one("a\n  {{ nope }}", teraval.context_new())
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            test.assert(e.at.line == 2)
+            test.assert(e.at.column == 6)
+
+    test.case("rule: a filter error built without a position gets the filter's")
+    match terarender.render_one("\n\n{{ 1 | upper }}", teraval.context_new())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(e.at.line == 3)
+
+    test.case("rule: an error that already has a position keeps it")
+    let placed = teraerror.TeraError { kind: ErrorLimit("x"), at: span("elsewhere", 7, 7), chain: [] }
+    match terarender.render_one("{{ 1 | boom }}", teraval.context_new())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(e.at.template == "template")
+    match teraparse.set_add(teraparse.set_new(), "p.html", "{{ 1 | boom }}")
+        Err(_)  => test.assert(false)
+        Ok(set) =>
+            let filters = terafilter.with_filter(terafilter.builtin_filters(),
+                                                 terafilter.filter("boom", fn_boom))
+            match terarender.render([], set, "p.html", teraval.context_new(), filters, terafilter.builtin_tests())
+                Ok(_)  => test.assert(false)
+                Err(e) =>
+                    test.assert(e.at.template == "elsewhere")
+                    test.assert(e.at.line == 7)
+    test.assert(placed.at.line == 7)
+
+fn fn_boom(v: teraval.TeraValue,
+           args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    Err(teraerror.TeraError { kind: ErrorLimit("x"), at: span("elsewhere", 7, 7), chain: [] })

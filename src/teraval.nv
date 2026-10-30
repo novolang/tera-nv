@@ -1,33 +1,24 @@
 // teraval.nv — the values a template sees, and the context that holds
 // them.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// A template reads `{{ user.name }}` against a value that was never
+// type-checked, so `TeraValue` is a dynamic value: null, bool, int,
+// float, string, list and map. That is the shape serde-nv and std.json
+// speak, so a deserialised value renders without a second conversion.
+//
+// Int and float are separate kinds, where JSON has one number, so that
+// `{{ count }}` shows `3` and not `3.0`.
+//
+// A context is a value. `context_insert` returns a new context, so a
+// base context built once can have each page's variables added without
+// the pages affecting one another.
+//
+// A context holds no functions. A filter registry is the one place a
+// template reaches code, and the caller enumerates it.
 
+use std.str
+use std.list
 use teraerror
-
-// A TEMPLATE ENGINE NEEDS A DYNAMIC VALUE, and there is no way round
-// it: `{{ user.name }}` is a field access decided when the template
-// runs, against a value the template has never been type-checked
-// against.  So `TeraValue` is the JSON shape — null, bool, int, float,
-// string, list, map — and that is deliberately the same shape
-// serde-nv and std.json already speak, so that a program that has
-// deserialised something can render it without a second conversion.
-//
-// INT AND FLOAT ARE SEPARATE, and that is the one place this differs
-// from JSON's number.  `{{ count }}` rendering `3` rather than `3.0`
-// is the difference between a page a reader trusts and one they do
-// not, and an engine that could not tell the two apart would have to
-// guess from the digits.
-//
-// THE CONTEXT IS A VALUE, NOT A BUILDER.  `context_insert` returns a
-// new context, so a caller can build a base context once and add a
-// page's own variables per page without the two interfering — which
-// is exactly what a site generator rendering 58 pages does.
-//
-// THERE IS NO WAY TO PUT A FUNCTION IN A CONTEXT, on purpose.  A
-// template that can call arbitrary code is a template that is a
-// program, and the whole reason to put logic in a filter registry
-// instead is that the registry is a thing the caller enumerated.
 
 // TeraValue is what a template can see.
 pub enum TeraValue
@@ -67,7 +58,7 @@ pub struct TeraContext
 //     println(teraval.to_display(teraval.context_get(ctx, "title") ?? ValueNull))
 // ```
 pub fn context_new() -> TeraContext []
-    todo("tera-nv.teraval.context_new")
+    TeraContext { pairs: [] }
 
 // context_insert is the context with one more variable.
 //
@@ -76,18 +67,34 @@ pub fn context_new() -> TeraContext []
 // the new value takes the old one's position — so a caller that
 // overrides a default does not also reorder the map.
 pub fn context_insert(ctx: TeraContext, name: Str, value: TeraValue) -> TeraContext []
-    todo("tera-nv.teraval.context_insert")
+    var pairs: [TeraPair] = []
+    var placed = false
+    for p in ctx.pairs
+        if p.key == name
+            list.push(pairs, TeraPair { key: name, value: value })
+            placed = true
+        else
+            list.push(pairs, p)
+    if not placed
+        list.push(pairs, TeraPair { key: name, value: value })
+    TeraContext { pairs: pairs }
 
 // context_get is a variable's value, or `None`.
 pub fn context_get(ctx: TeraContext, name: Str) -> ?TeraValue []
-    todo("tera-nv.teraval.context_get")
+    for p in ctx.pairs
+        if p.key == name
+            return Some(p.value)
+    None
 
 // context_names is every variable name, in insertion order.
 //
 // For a diagnostic: "unknown variable `titl`" is much more useful when
 // the engine can also say what there was.
 pub fn context_names(ctx: TeraContext) -> [Str] []
-    todo("tera-nv.teraval.context_names")
+    var names: [Str] = []
+    for p in ctx.pairs
+        list.push(names, p.key)
+    names
 
 // context_from_map is a context out of a map value.
 //
@@ -96,7 +103,11 @@ pub fn context_names(ctx: TeraContext) -> [Str] []
 // not a map, because a template's context is named variables and a
 // list has no names.
 pub fn context_from_map(v: TeraValue) -> ?TeraContext []
-    todo("tera-nv.teraval.context_from_map")
+    match v
+        ValueMap(pairs) =>
+            Some(TeraContext { pairs: list.clone(pairs) })
+        _               =>
+            None
 
 // lookup resolves a dotted path against a value.
 //
@@ -108,7 +119,20 @@ pub fn context_from_map(v: TeraValue) -> ?TeraContext []
 // answers a caller needs to tell apart: a field that does not exist is
 // `ErrorNoSuchField`, and indexing a string is `ErrorFilterRefused`.
 pub fn lookup(v: TeraValue, path: Str) -> Result<TeraValue, teraerror.TeraError> []
-    todo("tera-nv.teraval.lookup")
+    if path == ""
+        return Ok(v)
+    var cur = v
+    var seen = ""
+    for key in str.split(path, ".")
+        if not is_container(cur)
+            return Err(refusal(type_name(cur)))
+        seen = joined(seen, key)
+        match step(cur, key)
+            None    =>
+                return Err(no_field(seen))
+            Some(n) =>
+                cur = n
+    Ok(cur)
 
 // is_truthy is what `{% if %}` decides on.
 //
@@ -119,7 +143,21 @@ pub fn lookup(v: TeraValue, path: Str) -> Result<TeraValue, teraerror.TeraError>
 // the renderer, and because an author debugging an `{% if %}` needs
 // the rule written down somewhere.
 pub fn is_truthy(v: TeraValue) -> Bool []
-    todo("tera-nv.teraval.is_truthy")
+    match v
+        ValueNull     =>
+            false
+        ValueBool(b)  =>
+            b
+        ValueInt(n)   =>
+            n != 0
+        ValueFloat(f) =>
+            f != 0.0
+        ValueStr(t)   =>
+            str.len(t) > 0
+        ValueList(xs) =>
+            list.len(xs) > 0
+        ValueMap(ps)  =>
+            list.len(ps) > 0
 
 // to_display is how a value renders inside `{{ }}`.
 //
@@ -129,14 +167,48 @@ pub fn is_truthy(v: TeraValue) -> Bool []
 // what an author meant, and is much better than an empty string,
 // because the page then shows what went wrong instead of hiding it.
 pub fn to_display(v: TeraValue) -> Str []
-    todo("tera-nv.teraval.to_display")
+    match v
+        ValueNull     =>
+            ""
+        ValueStr(t)   =>
+            t
+        ValueBool(b)  =>
+            str.from_bool(b)
+        ValueInt(n)   =>
+            str.from_int(n)
+        ValueFloat(f) =>
+            float_text(f)
+        _             =>
+            to_json(v)
 
 // to_json is a value as JSON text.
 //
 // What the `json_encode` filter is, and what a caller embedding data
 // in a `<script type="application/json">` needs.
 pub fn to_json(v: TeraValue) -> Str []
-    todo("tera-nv.teraval.to_json")
+    match v
+        ValueNull     =>
+            "null"
+        ValueBool(b)  =>
+            str.from_bool(b)
+        ValueInt(n)   =>
+            str.from_int(n)
+        ValueFloat(f) =>
+            if f != f or f - f != 0.0
+                return "null"
+            float_text(f)
+        ValueStr(t)   =>
+            quote(t)
+        ValueList(xs) =>
+            var parts: [Str] = []
+            for x in xs
+                list.push(parts, to_json(x))
+            "[" + str.join(parts, ",") + "]"
+        ValueMap(ps)  =>
+            var parts: [Str] = []
+            for p in ps
+                list.push(parts, quote(p.key) + ":" + to_json(p.value))
+            "{" + str.join(parts, ",") + "}"
 
 // type_name is `"null"`, `"bool"`, `"int"`, `"float"`, `"string"`,
 // `"list"` or `"map"`.
@@ -144,7 +216,21 @@ pub fn to_json(v: TeraValue) -> Str []
 // For an error message: "filter `upper` wanted a string, got a list"
 // is the message, and this is where the last two words come from.
 pub fn type_name(v: TeraValue) -> Str []
-    todo("tera-nv.teraval.type_name")
+    match v
+        ValueNull     =>
+            "null"
+        ValueBool(_)  =>
+            "bool"
+        ValueInt(_)   =>
+            "int"
+        ValueFloat(_) =>
+            "float"
+        ValueStr(_)   =>
+            "string"
+        ValueList(_)  =>
+            "list"
+        ValueMap(_)   =>
+            "map"
 
 // equals is value equality, used by `{% if a == b %}`.
 //
@@ -154,7 +240,31 @@ pub fn type_name(v: TeraValue) -> Str []
 // know that.  Two maps compare equal when they hold the same pairs,
 // whatever order they are in; two lists only in the same order.
 pub fn equals(a: TeraValue, b: TeraValue) -> Bool []
-    todo("tera-nv.teraval.equals")
+    match a
+        ValueNull     =>
+            kind_is(b, "null")
+        ValueBool(x)  =>
+            match b
+                ValueBool(y) =>
+                    x == y
+                _            =>
+                    false
+        ValueStr(x)   =>
+            match b
+                ValueStr(y) =>
+                    x == y
+                _           =>
+                    false
+        ValueList(xs) =>
+            lists_equal(xs, b)
+        ValueMap(ps)  =>
+            maps_equal(ps, b)
+        _             =>
+            match compare(a, b)
+                Some(c) =>
+                    c == 0
+                None    =>
+                    false
 
 // compare orders two values for `<`, `<=`, `>` and `>=`.
 //
@@ -162,4 +272,158 @@ pub fn equals(a: TeraValue, b: TeraValue) -> Bool []
 // as bytes; comparing values of different kinds is not an ordering
 // question, and `None` is how this says so rather than inventing one.
 pub fn compare(a: TeraValue, b: TeraValue) -> ?Int []
-    todo("tera-nv.teraval.compare")
+    match number_of(a)
+        Some(x) =>
+            return compare_number(x, b)
+        None    =>
+            return compare_text(a, b)
+
+fn compare_number(x: Float, b: TeraValue) -> ?Int
+    match number_of(b)
+        Some(y) =>
+            Some(order(x, y))
+        None    =>
+            None
+
+fn compare_text(a: TeraValue, b: TeraValue) -> ?Int
+    match a
+        ValueStr(x) =>
+            match b
+                ValueStr(y) =>
+                    if x < y
+                        return Some(-1)
+                    if x == y
+                        return Some(0)
+                    Some(1)
+                _           =>
+                    None
+        _           =>
+            None
+
+// step is one path segment applied to a value: a map's entry, or a
+// list's element when the segment is a non-negative integer.
+//
+// `None` when the value has no such entry, and for a value that is
+// neither a map nor a list.  The renderer resolves `a.b` and `a.0` with
+// it, and `lookup` is a loop over it.
+pub fn step(v: TeraValue, key: Str) -> ?TeraValue []
+    match v
+        ValueMap(ps)  =>
+            for p in ps
+                if p.key == key
+                    return Some(p.value)
+            None
+        ValueList(xs) =>
+            match str.to_int(key)
+                Some(i) =>
+                    if i >= 0 and i < list.len(xs)
+                        return Some(xs[i])
+                    None
+                None    =>
+                    None
+        _             =>
+            None
+
+fn joined(seen: Str, key: Str) -> Str
+    if seen == ""
+        return key
+    seen + "." + key
+
+// A zero position, for the errors this module builds: the renderer
+// puts the real one on before the error leaves the package.
+fn nowhere() -> teraerror.TeraSpan
+    teraerror.TeraSpan { template: "", line: 1, column: 1, offset: 0 }
+
+fn no_field(path: Str) -> teraerror.TeraError
+    teraerror.TeraError { kind: ErrorNoSuchField(path), at: nowhere(), chain: [] }
+
+fn refusal(got: Str) -> teraerror.TeraError
+    teraerror.TeraError { kind: ErrorFilterRefused("lookup", "a map or a list, got " + got),
+                          at: nowhere(), chain: [] }
+
+fn is_container(v: TeraValue) -> Bool
+    type_name(v) == "map" or type_name(v) == "list"
+
+fn kind_is(v: TeraValue, name: Str) -> Bool
+    type_name(v) == name
+
+// A float as the shortest text that reads back, with a point so that
+// it cannot be taken for an int.
+fn float_text(f: Float) -> Str
+    let t = str.from_float(f)
+    if str.contains(t, ".") or str.contains(t, "e") or str.contains(t, "n")
+        return t
+    t + ".0"
+
+fn number_of(v: TeraValue) -> ?Float
+    match v
+        ValueInt(n)   =>
+            Some(n as Float)
+        ValueFloat(f) =>
+            Some(f)
+        _             =>
+            None
+
+fn order(x: Float, y: Float) -> Int
+    if x < y
+        return -1
+    if x == y
+        return 0
+    1
+
+fn lists_equal(xs: [TeraValue], b: TeraValue) -> Bool
+    match b
+        ValueList(ys) =>
+            if list.len(xs) != list.len(ys)
+                return false
+            for i in 0..list.len(xs)
+                if not equals(xs[i], ys[i])
+                    return false
+            true
+        _             =>
+            false
+
+fn maps_equal(ps: [TeraPair], b: TeraValue) -> Bool
+    match b
+        ValueMap(qs) =>
+            if list.len(ps) != list.len(qs)
+                return false
+            for p in ps
+                match step(b, p.key)
+                    Some(other) =>
+                        if not equals(p.value, other)
+                            return false
+                    None        =>
+                        return false
+            true
+        _            =>
+            false
+
+// A string as a JSON string literal.
+fn quote(t: Str) -> Str
+    let sb = str.builder_new()
+    str.builder_append_char(sb, '"')
+    for i in 0..str.len(t)
+        let b = str.byte_at_or(t, i, 0)
+        if b == '"'
+            str.builder_append(sb, "\\\"")
+        else if b == '\\'
+            str.builder_append(sb, "\\\\")
+        else if b == '\n'
+            str.builder_append(sb, "\\n")
+        else if b == '\r'
+            str.builder_append(sb, "\\r")
+        else if b == '\t'
+            str.builder_append(sb, "\\t")
+        else if b < 32
+            str.builder_append(sb, "\\u00" + hex2(b))
+        else
+            str.builder_append_char(sb, b)
+    str.builder_append_char(sb, '"')
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+fn hex2(b: Int) -> Str
+    let digits = "0123456789abcdef"
+    str.slice(digits, b / 16, b / 16 + 1) + str.slice(digits, b % 16, b % 16 + 1)

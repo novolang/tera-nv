@@ -10,12 +10,6 @@ template is parsed once from text the caller supplies and rendered many
 times. Its escaping is
 [html-nv](https://novo-lang.org/packages/html-nv)'s.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is
-declared with its full signature, but every body is a `todo()` that
-panics when called. The package is published so its design can be
-reviewed and depended on before it is implemented. Version 0.1.0 will
-be the first working release.
-
 ## What the language is
 
 `{{ title }}` is an **expression**: the value of `title`, rendered into
@@ -88,10 +82,7 @@ fn main() [io]
                 Err(e)   => println(teraerror.report(e, teraparse.set_sources(set)))
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: tera-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
+Build and test with `novo pkg build` and `novo test`.
 
 ## What the package contains
 
@@ -102,6 +93,7 @@ specification the implementation will have to satisfy.
 | `teraparse` | A template parsed once, the set of them, the escaping rule and the render limits. |
 | `terafilter` | The filter and test registries, and the builders for adding to them. |
 | `terarender` | Rendering a template into a buffer the caller owns, and the escape the renderer uses. |
+| `teracompile`, `teranode` | The parser and the tree it makes. Used by `teraparse`; a program does not call them. |
 
 ## How to choose an entry point
 
@@ -114,7 +106,8 @@ path.** Build the set once, render many times.
 endpoint answering a fragment wants.
 
 **`terarender.render_one` renders a template with no set at all**, for
-a template with no `extends` and no `include`.
+a template with no `extends` and no `include`. It is autoescaped, as
+if its name ended in `.html`.
 
 **`teraparse.set_check` runs at build time.** It finds a block a child
 overrides that no parent defines, an `extends` cycle and a missing
@@ -139,7 +132,8 @@ parent, before anything is rendered.
    is not, which is Tera's own rule. It gets a site generator's `.html`
    layouts and its `.txt` mail templates both right with no
    configuration. `EscapeAlways` and `EscapeNever` are the named
-   overrides.
+   overrides. The name that decides is the one the render was asked
+   for, and the templates it extends and includes follow it.
 4. **The escape is html-nv's `escape_attr`, everywhere.** It replaces
    five characters: `&`, `<`, `>`, `"` and `'`. A template engine
    cannot tell whether a `{{ }}` sits inside an attribute, and escaping
@@ -151,13 +145,16 @@ parent, before anything is rendered.
    is needed and it can be searched for. A caller rendering templates
    it does not trust removes it:
    `terafilter.without_filter(builtin_filters(), "safe")`.
-6. **A null value renders as empty and is false.** That is Jinja2's
+6. **Output that is markup already is not escaped again.** That is the
+   result of a macro, of `super()`, and of a filter chain that has
+   `safe`, `escape` or `escape_xml` in it.
+7. **A null value renders as empty and is false.** That is Jinja2's
    rule and what a template author expects.
    `teraval.is_truthy` is the whole predicate.
-7. **A map iterates in insertion order.** `ValueMap` holds pairs rather
+8. **A map iterates in insertion order.** `ValueMap` holds pairs rather
    than a hash, because a page whose navigation reorders itself between
    two renders of the same data has a diff nobody can read.
-8. **Three limits bound a render.** They are checked during it, not
+9. **Three limits bound a render.** They are checked during it, not
    after.
 
    | `TeraLimits` field | What it bounds | `default_limits()` |
@@ -166,11 +163,11 @@ parent, before anything is rendered.
    | `max_iterations` | Loop iterations in one render | 10,000,000 |
    | `max_output` | Bytes one render may produce | 64 MiB |
 
-9. **A missing include is an error, not an empty expansion.** A
+10. **A missing include is an error, not an empty expansion.** A
    production build that silently dropped a header is worse than one
    that failed. A development server that wants the other behaviour
    catches `ErrorTemplateNotFound` and carries on.
-10. **An error carries a chain, not a line.** A page extends a base,
+11. **An error carries a chain, not a line.** A page extends a base,
     which includes a header, which includes a navigation bar, and the
     variable that was missing was missing in the navigation bar,
     referenced from a block the page defined. `TeraError` carries the
@@ -178,11 +175,11 @@ parent, before anything is rendered.
     whole chain with the source lines, `one_line` is the log form, and
     `missing_template` is the one question a caller asks without
     matching on the error.
-11. **A context holds values, never functions.** `TeraValue` has no
+12. **A context holds values, never functions.** `TeraValue` has no
     function variant. Logic goes in a filter, and a filter is something
     the caller enumerated, so a template can reach nothing the caller
     did not put in the context or the registry.
-12. **A template is parsed, so content is content.** A page whose body
+13. **A template is parsed, so content is content.** A page whose body
     contains the literal text `{{ title }}`, such as a page documenting
     this syntax, renders that text. An engine that substituted into a
     string and substituted again would replace it.
@@ -241,57 +238,72 @@ with `{%-` and `-%}`.
 - [i18n-nv](https://novo-lang.org/packages/i18n-nv) holds the message
   catalogue a `t` filter would read.
 
+## Differences from Tera and Jinja2
+
+Tera and Jinja2 share most of their syntax. Where this package does
+something other than Jinja2 does, it is listed here. The right-hand
+column was checked against Jinja2 3.1.
+
+| Construct | This package | Jinja2 |
+| --- | --- | --- |
+| A name or field that is not there | An error naming it | An empty string, unless run strict |
+| `{{ true }}` and `{{ false }}` | `true`, `false` | `True`, `False` |
+| `{{ [1, 2] }}` and a map | JSON text | Python text |
+| `a and b`, `a or b` | A bool | One of the operands |
+| A macro's access to the template's variables | None | All of them |
+| Calling a macro | `m(x)`, `ns::m(x)` or `ns.m(x)` | `m(x)` or `ns.m(x)` |
+| A filter's arguments | By position; a name before `=` is read and ignored | By position or name |
+| `for k, v in map` | The pairs, in insertion order | Needs `map.items()` |
+| `for i, x in list` | The index from 0 and the item | The items must be pairs |
+| The test for null | `is null` | `is none` |
+| Arithmetic, `~`, `{% while %}`, `{% break %}` | Not in the language | Arithmetic and `~` are |
+
+A filter that Jinja2 also has can still answer differently. The ones
+that do:
+
+| Filter | This package |
+| --- | --- |
+| `upper`, `lower`, `capitalize`, `title` | Change ASCII letters only. |
+| `truncate(n)` | Keeps the first `n` characters and adds nothing, unless a second argument gives the text to add when it cut. |
+| `sort`, `unique` | Compare strings by bytes. Jinja2 ignores case by default. |
+| `round` | Halves go away from zero. Python rounds halves to even. |
+| `striptags` | Removes what lies between `<` and `>`. It does not collapse white space or read entities. |
+| `escape_xml` | Writes the apostrophe as `&apos;`. |
+| `slice(start, end)` | Takes the items from `start` up to `end`. Jinja2's `slice` splits a list into columns. |
+| `default(v)` | Replaces null and a name that is not there. A true second argument also replaces any false value. |
+| `filesizeformat` | Powers of 1,000 with one decimal, as in Jinja2: `999 Bytes`, `1.0 kB`. |
+| `slugify`, `nth`, `group_by`, `linebreaks`, `filter` | Defined here. Jinja2 has no filter of these names. |
+
 ## Tests
 
 ```bash
-novo test tests/teraval_tests.nv      # the value model's rules
-novo test tests/teraparse_tests.nv    # the set, inheritance, and the errors
-novo test tests/terarender_tests.nv   # the language, and autoescaping first
+novo test tests/oracle_tests.nv   # cases whose expected text Jinja2 produced
+novo test tests/lang_tests.nv     # Tera's rules, derived by hand
+novo test tests/filter_tests.nv   # every filter and test, called directly
+novo test tests/syntax_tests.nv   # templates that do not parse, and where
+novo test tests/error_tests.nv    # messages, reports and positions
+novo test tests/teraval_tests.nv
+novo test tests/teraparse_tests.nv
+novo test tests/terarender_tests.nv
+bash tests/coverage.sh            # line coverage of src/, merged across the suites
 ```
 
-The reference implementations are Tera, for the template set, the
-inheritance model, the registries and the escape-by-suffix rule, and
-Jinja2, for the language itself: the `loop` variables, the truthiness
-rule, `{{ super() }}`, and the decision that a template is not a
-programming language. MiniJinja is the reference for the value model
-being the one the caller's data is already in, and Askama is the
-reference for what compiling templates costs.
+Jinja2 3.1 is the reference for the part of the language it shares with
+Tera. `tools/oracle.py` renders each case in Jinja2, set to behave as
+Tera does where a setting decides it: an unknown name is an error, the
+last newline is kept, and the name's suffix decides autoescaping. The
+script writes `tests/oracle_tests.nv` from the answers. Jinja2 writes a
+double quote as `&#34;` and html-nv writes `&quot;`, so the script
+rewrites the first to the second, and nothing else. The script also
+compares `to_json` with Python's `json.dumps` in its compact form.
 
-The oracles are Tera's and Jinja2's own suites, which are pairs of a
-template and its output. The autoescaping corpus is this package's own,
-because that part is a security property rather than a feature.
+Where Tera and Jinja2 differ, or only Tera has the construct, the
+expected text in `tests/lang_tests.nv` and `tests/filter_tests.nv`
+was derived by hand, and each case states the rule it follows.
+`tools/syntax.py` writes `tests/syntax_tests.nv` from templates that
+mark where each error must point.
 
-The suite asserts that a value containing `<script>` renders escaped in
-a `.html` template and unescaped in a `.txt` one, that `| safe` turns
-escaping off for one value and nothing else, that a null value renders
-empty and is false, that a map iterates in insertion order, that a
-block a child overrides and no parent defines is reported by
-`set_check` rather than rendering an empty page, that an extends cycle
-is refused, and that each of the three limits stops a render.
-
-The tests compile today and fail at run, each on the
-`not implemented: tera-nv.<module>.<fn>` panic that is its body. That
-is the expected state of an interface release. They turn green one at a
-time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| Every `pub struct` and `pub enum` in the five modules | the types are declared |
-| `teraerror.report`, `.one_line`, `.missing_template`, `TeraError.message` | no |
-| `teraval.context_new`, `.context_insert`, `.context_get`, `.context_names`, `.context_from_map` | no |
-| `teraval.lookup`, `.is_truthy`, `.to_display`, `.to_json`, `.type_name`, `.equals`, `.compare` | no |
-| `teraparse.default_limits`, `.parse` | no |
-| `teraparse.template_name`, `.template_source`, `.references`, `.extends_name` | no |
-| `teraparse.blocks`, `.variables`, `.filters_used` | no |
-| `teraparse.set_new`, `.set_with`, `.set_add`, `.set_add_parsed`, `.set_names`, `.set_get` | no |
-| `teraparse.set_missing`, `.set_check`, `.set_sources`, `.escapes_name` | no |
-| `terafilter.builtin_filters`, `.no_filters`, `.with_filter`, `.without_filter` | no |
-| `terafilter.filter_names`, `.get`, `.filter`, `.refuse` | no |
-| `terafilter.builtin_tests`, `.with_test`, `.test_names` | no |
-| `terarender.render`, `.render_with`, `.render_str`, `.render_one`, `.render_block` | no |
-| `terarender.escape`, `.escape_into`, `.loop_variable_names`, `.missing` | no |
+The suites measure 100% of the lines under `src/`.
 
 ## Licence
 

@@ -1,21 +1,14 @@
 // teraerror.nv — what went wrong, where, and through which include.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
-// A TEMPLATE ERROR THAT DOES NOT NAME A LINE IS NOT AN ERROR REPORT.
-// The whole reason a template engine is worth using rather than string
-// concatenation is that a template is a file somebody edits, and the
-// moment it breaks the only useful thing an engine can say is which
-// file, which line, and what it was looking at.  "undefined variable"
-// on its own is a search.
-//
-// AND THE CHAIN IS HALF OF IT.  A page extends a base, which includes
-// a header, which includes a nav — and the variable that was missing
-// was missing in the nav, referenced from a block the page defined.
-// One line number describes none of that.  `TeraError.chain` is the
-// stack of templates that were being rendered, innermost first, each
-// with the line in it that led to the next, which is the same shape a
-// backtrace has and for the same reason.
+// An error names the template, the line and the column of the fault. A
+// page may extend a base that includes a header that includes a
+// navigation bar, and one line number describes none of that, so an
+// error also carries the chain of templates the renderer was in.
+// `TeraError.chain` lists them innermost first, each with the position
+// in it that led to the next, the way a backtrace does.
+
+use std.str
+use std.list
 
 // TeraSpan is a position in one template.
 pub struct TeraSpan
@@ -65,14 +58,17 @@ pub enum TeraErrorKind
     // `{% endfor %}`.
     ErrorUnclosed(tag: Str)
     // An `{% endfor %}` with no `{% for %}`, or an `{% else %}` where
-    // nothing branches.
+    // nothing branches. `set_check` also uses it, with the tag `block
+    // <name>`, for a block that a child overrides and no parent defines.
     ErrorUnexpectedTag(tag: Str)
     // A name the context does not hold.  The most common error there
     // is, and the reason it names the variable and not just the line.
     ErrorUnknownVariable(name: Str)
-    // A field or index the value does not have.
+    // A field or index the value does not have. Also a macro the
+    // template does not define, a `super()` with no parent block, and a
+    // block that `render_block` was asked for and the template lacks.
     ErrorNoSuchField(path: Str)
-    // A filter name the registry does not hold.  `suggestion` is the
+    // A filter or test name the registry does not hold.  `suggestion` is the
     // nearest name that is in it, or empty — a misspelled filter is
     // the second most common error and a suggestion turns it into a
     // typo.
@@ -80,9 +76,9 @@ pub enum TeraErrorKind
     // A filter refused its input: `upper` on a list, `length` on a
     // number.  `filter` names it and `because` says what it wanted.
     ErrorFilterRefused(filter: Str, because: Str)
-    // A template referenced a template the set does not hold.  THE ONE
-    // A HOST CAN ACT ON: it means "go and read this file, add it, and
-    // render again", which is what `terarender.missing` is for.
+    // A template referenced a template the set does not hold. This is
+    // the error a host can act on: it means "go and read this file, add
+    // it, and render again", which is what `terarender.missing` is for.
     ErrorTemplateNotFound(name: Str)
     // `{% extends %}` cycles, or an include includes itself.
     ErrorCycle(name: Str)
@@ -109,7 +105,7 @@ pub struct TeraError
 // returning `Result<_, Str>`.
 impl Error for TeraError
     fn message(self) -> Str
-        todo("tera-nv.teraerror.TeraError.message")
+        kind_message(self.kind)
 
 // report is the error as a caller should print it: the message, the
 // position, the source line, a caret, and the chain.
@@ -128,19 +124,78 @@ impl Error for TeraError
 //   in block `content` of `page.html`, line 8
 // ```
 pub fn report(e: TeraError, sources: [TeraSource]) -> Str []
-    todo("tera-nv.teraerror.report")
+    var out = e.message() + " in `" + e.at.template + "`, line " + str.from_int(e.at.line)
+    out = out + excerpt(e.at, sources)
+    for f in e.chain
+        out = out + "\n  " + frame_text(f)
+    out
 
 // TeraSource is a template's name and its text, for `report`.
 pub struct TeraSource
     name: Str
     text: Str
 
+// span_at is the position of a byte offset in a template's text: its
+// line and column, both counted from 1.
+//
+// A function of its own because the parser and the renderer each know
+// an offset where they find a fault and need the same arithmetic to
+// turn it into the position an error reports.
+pub fn span_at(template: Str, source: Str, offset: Int) -> TeraSpan []
+    var line = 1
+    var start = 0
+    var i = 0
+    let end = min_int(offset, str.len(source))
+    while i < end
+        if str.byte_at_or(source, i, 0) == '\n'
+            line = line + 1
+            start = i + 1
+        i = i + 1
+    TeraSpan { template: template, line: line, column: offset - start + 1, offset: offset }
+
+fn min_int(a: Int, b: Int) -> Int
+    if a < b
+        return a
+    b
+
+// nearest is the name in `candidates` closest to `name`, or empty when
+// none is within two edits.
+//
+// What an unknown filter's `suggestion` is made of: one inserted,
+// dropped or changed letter is a typo, and a name further off than two
+// is a different word.
+pub fn nearest(name: Str, candidates: [Str]) -> Str []
+    var best = ""
+    var best_cost = 3
+    for c in candidates
+        let cost = edit_distance(name, c)
+        if cost < best_cost
+            best = c
+            best_cost = cost
+    best
+
+// The fewest single-byte insertions, deletions and changes that turn
+// `a` into `b`.
+fn edit_distance(a: Str, b: Str) -> Int
+    var row: [Int] = []
+    for j in 0..str.len(b) + 1
+        list.push(row, j)
+    for i in 0..str.len(a)
+        var next: [Int] = [i + 1]
+        for j in 0..str.len(b)
+            var cost = 1
+            if str.byte_at_or(a, i, 0) == str.byte_at_or(b, j, 0)
+                cost = 0
+            list.push(next, min_int(min_int(row[j + 1] + 1, next[j] + 1), row[j] + cost))
+        row = next
+    row[str.len(b)]
+
 // one_line is the error without the source excerpt.
 //
 // For a log, where the caret is noise: `nav.html:4:18: unknown
 // variable `user.nmae``.
 pub fn one_line(e: TeraError) -> Str []
-    todo("tera-nv.teraerror.one_line")
+    e.at.template + ":" + str.from_int(e.at.line) + ":" + str.from_int(e.at.column) + ": " + e.message()
 
 // missing_template is the name a `ErrorTemplateNotFound` names, or
 // `None` for any other error.
@@ -150,4 +205,81 @@ pub fn one_line(e: TeraError) -> Str []
 // a match at every call site, because the render loop that asks it is
 // the shape this whole package is built around.
 pub fn missing_template(e: TeraError) -> ?Str []
-    todo("tera-nv.teraerror.missing_template")
+    match e.kind
+        ErrorTemplateNotFound(name) =>
+            Some(name)
+        _                           =>
+            None
+
+// The error's kind in words.
+fn kind_message(k: TeraErrorKind) -> Str
+    match k
+        ErrorSyntax(found)              =>
+            "syntax error at `" + found + "`"
+        ErrorUnclosed(tag)              =>
+            "`" + tag + "` is never closed"
+        ErrorUnexpectedTag(tag)         =>
+            "unexpected `" + tag + "`"
+        ErrorUnknownVariable(name)      =>
+            "unknown variable `" + name + "`"
+        ErrorNoSuchField(path)          =>
+            "no such field `" + path + "`"
+        ErrorUnknownFilter(name, hint)  =>
+            unknown_filter(name, hint)
+        ErrorFilterRefused(filter, why) =>
+            "filter `" + filter + "` wanted " + why
+        ErrorTemplateNotFound(name)     =>
+            "template `" + name + "` is not in the set"
+        ErrorCycle(name)                =>
+            "`" + name + "` includes or extends itself"
+        ErrorDuplicateBlock(name)       =>
+            "block `" + name + "` is defined twice"
+        ErrorLimit(what)                =>
+            "the " + what + " limit was reached"
+
+fn unknown_filter(name: Str, hint: Str) -> Str
+    let base = "unknown filter or test `" + name + "`"
+    if hint == ""
+        return base
+    base + ", did you mean `" + hint + "`"
+
+// One chain entry as a line of the report.
+fn frame_text(f: TeraFrame) -> Str
+    let where = "`" + f.at.template + "`, line " + str.from_int(f.at.line)
+    match f.how
+        FrameInclude  =>
+            "included from " + where
+        FrameExtends  =>
+            "extended from " + where
+        FrameBlock(n) =>
+            "in block `" + n + "` of " + where
+        FrameMacro(n) =>
+            "in macro `" + n + "`, called from " + where
+
+// The source line of a span with a caret under the text, or nothing
+// when the source is not among `sources`.
+fn excerpt(at: TeraSpan, sources: [TeraSource]) -> Str
+    for src in sources
+        if src.name == at.template
+            let lines = str.split(src.text, "\n")
+            if at.line < 1 or at.line > list.len(lines)
+                return ""
+            let text = lines[at.line - 1]
+            let num = str.from_int(at.line)
+            let gutter = str.repeat(" ", str.len(num))
+            let pad = str.repeat(" ", at.column - 1)
+            let width = word_width(text, at.column - 1)
+            return "\n  " + num + " | " + text + "\n  " + gutter + " | " + pad + str.repeat("^", width)
+    ""
+
+// How many bytes of a name or path start at `from`; 1 for anything else.
+fn word_width(text: Str, from: Int) -> Int
+    var n = 0
+    while is_word(str.byte_at_or(text, from + n, 0))
+        n = n + 1
+    if n == 0
+        return 1
+    n
+
+fn is_word(b: Int) -> Bool
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z' or b >= '0' and b <= '9' or b == '_' or b == '.'

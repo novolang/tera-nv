@@ -1,36 +1,29 @@
-// terafilter.nv — the filters, as a registry the caller extends.
+// terafilter.nv — the filters and tests, as registries the caller
+// extends.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// `{{ x | upper | truncate(40) }}` is a pipeline of functions, and the
+// set of functions is a value: the caller can list it, add to it, and
+// remove from it. A filter is `fn(TeraValue, [TeraValue]) ->
+// Result<TeraValue, TeraError>` and performs no input or output, so a
+// filter that needs a file takes the file's text from the context.
+//
+// The builtins are the ones that are arithmetic on values. There is no
+// `date` filter, because formatting a timestamp is calendar-nv's work,
+// and no `markdown` filter, because that is markdown-nv's. A caller
+// that wants either registers it in a few lines.
+//
+// `safe` turns autoescaping off for one value, so it is the one filter
+// that can put markup in a page that the caller did not write. A
+// renderer of templates it does not trust removes it with
+// `without_filter`.
 
+use std.str
+use std.list
+use std.math
+use std.regex
+use htmlsafe
 use teraval
 use teraerror
-
-// A FILTER REGISTRY IS HOW A TEMPLATE LANGUAGE STAYS SMALL.  The
-// alternative is that every transformation anybody wants becomes a tag
-// in the language, and the language grows until it is a programming
-// language with the worst possible syntax.  `{{ x | upper | truncate(40) }}`
-// is a pipeline of functions, and the set of functions is a value the
-// caller can see, enumerate and add to.
-//
-// AND IT IS HOW THE PACKAGE STAYS `core`.  A filter is
-// `fn(TeraValue, [TeraValue]) -> Result<TeraValue, TeraError>` — pure,
-// like everything else here.  A caller that wants a filter which reads
-// a file computes the value in its own code and puts it in the
-// context; a filter that could read would make every template render
-// an effect and cost this package its layer.
-//
-// THE BUILTINS ARE THE ONES THAT ARE ARITHMETIC.  What is not here is
-// as much the design as what is: no `date`, because formatting a
-// timestamp is calendar-nv's arithmetic and a dependency this package
-// should not make every consumer take; no `markdown`, because that is
-// markdown-nv and a `web` package depending on a `text` package to
-// render a filter nobody may use is the wrong direction — a caller
-// that wants it registers three lines; and nothing that fetches, reads
-// or measures the clock, because `core`.
-//
-// `safe` IS NOT A FILTER LIKE THE OTHERS and is documented as such
-// below: it is the one that turns autoescaping off for a value, which
-// makes it the one that can put a hole in a page.
 
 // TeraFilter is one named filter.
 pub struct TeraFilter
@@ -47,21 +40,21 @@ pub struct TeraFilters
 
 // builtin_filters is the set every render starts from.
 //
-// **Text**: `upper`, `lower`, `capitalize`, `title`, `trim`,
+// Text: `upper`, `lower`, `capitalize`, `title`, `trim`,
 // `trim_start`, `trim_end`, `truncate(n)`, `wordcount`, `replace(f,t)`,
 // `indent(n)`, `linebreaks`, `striptags`, `slugify`.
 //
-// **Collections**: `length`, `first`, `last`, `nth(n)`, `reverse`,
+// Collections: `length`, `first`, `last`, `nth(n)`, `reverse`,
 // `join(sep)`, `sort`, `unique`, `slice(start, end)`, `map(field)`,
 // `filter(field, value)`, `group_by(field)`.
 //
-// **Numbers**: `abs`, `round`, `round(places)`, `int`, `float`,
+// Numbers: `abs`, `round`, `round(places)`, `int`, `float`,
 // `filesizeformat`.
 //
-// **Escaping and encoding**: `escape`, `escape_xml`, `safe`,
+// Escaping and encoding: `escape`, `escape_xml`, `safe`,
 // `urlencode`, `urlencode_strict`, `json_encode`.
 //
-// **Absence**: `default(v)`, which is what a template writes instead
+// Absence: `default(v)`, which is what a template writes instead
 // of an `{% if %}` around every optional field.
 //
 // ```novo
@@ -72,7 +65,46 @@ pub struct TeraFilters
 //     println(str.from_int(list.len(terafilter.filter_names(f))))
 // ```
 pub fn builtin_filters() -> TeraFilters []
-    todo("tera-nv.terafilter.builtin_filters")
+    var reg: [TeraFilter] = []
+    list.push(reg, filter("upper", f_upper))
+    list.push(reg, filter("lower", f_lower))
+    list.push(reg, filter("capitalize", f_capitalize))
+    list.push(reg, filter("title", f_title))
+    list.push(reg, filter("trim", f_trim))
+    list.push(reg, filter("trim_start", f_trim_start))
+    list.push(reg, filter("trim_end", f_trim_end))
+    list.push(reg, filter("truncate", f_truncate))
+    list.push(reg, filter("wordcount", f_wordcount))
+    list.push(reg, filter("replace", f_replace))
+    list.push(reg, filter("indent", f_indent))
+    list.push(reg, filter("linebreaks", f_linebreaks))
+    list.push(reg, filter("striptags", f_striptags))
+    list.push(reg, filter("slugify", f_slugify))
+    list.push(reg, filter("length", f_length))
+    list.push(reg, filter("first", f_first))
+    list.push(reg, filter("last", f_last))
+    list.push(reg, filter("nth", f_nth))
+    list.push(reg, filter("reverse", f_reverse))
+    list.push(reg, filter("join", f_join))
+    list.push(reg, filter("sort", f_sort))
+    list.push(reg, filter("unique", f_unique))
+    list.push(reg, filter("slice", f_slice))
+    list.push(reg, filter("map", f_map))
+    list.push(reg, filter("filter", f_filter))
+    list.push(reg, filter("group_by", f_group_by))
+    list.push(reg, filter("abs", f_abs))
+    list.push(reg, filter("round", f_round))
+    list.push(reg, filter("int", f_int))
+    list.push(reg, filter("float", f_float))
+    list.push(reg, filter("filesizeformat", f_filesizeformat))
+    list.push(reg, filter("escape", f_escape))
+    list.push(reg, filter("escape_xml", f_escape_xml))
+    list.push(reg, filter("safe", f_safe))
+    list.push(reg, filter("urlencode", f_urlencode))
+    list.push(reg, filter("urlencode_strict", f_urlencode_strict))
+    list.push(reg, filter("json_encode", f_json_encode))
+    list.push(reg, filter("default", f_default))
+    TeraFilters { filters: reg }
 
 // no_filters is an empty set.
 //
@@ -80,35 +112,56 @@ pub fn builtin_filters() -> TeraFilters []
 // give exactly the filters it chose — which, with `EscapeAlways`, is
 // the shape a multi-tenant renderer needs.
 pub fn no_filters() -> TeraFilters []
-    todo("tera-nv.terafilter.no_filters")
+    TeraFilters { filters: [] }
 
 // with_filter is the set with one more filter.
 //
 // A name already present is REPLACED, so a caller can override a
 // builtin — which is how `truncate` becomes one that counts grapheme
 // clusters rather than bytes, for a caller that has unicode-nv.
-pub fn with_filter(fs: TeraFilters, f: TeraFilter) -> TeraFilters []
-    todo("tera-nv.terafilter.with_filter")
+pub fn with_filter(reg: TeraFilters, f: TeraFilter) -> TeraFilters []
+    var out: [TeraFilter] = []
+    var placed = false
+    for g in reg.filters
+        if g.name == f.name
+            list.push(out, f)
+            placed = true
+        else
+            list.push(out, g)
+    if not placed
+        list.push(out, f)
+    TeraFilters { filters: out }
 
 // without_filter is the set with one removed.
 //
 // Named rather than left to the caller because removing `safe` is the
 // one edit a renderer of untrusted templates has to make, and it
 // should be one line.
-pub fn without_filter(fs: TeraFilters, name: Str) -> TeraFilters []
-    todo("tera-nv.terafilter.without_filter")
+pub fn without_filter(reg: TeraFilters, name: Str) -> TeraFilters []
+    var out: [TeraFilter] = []
+    for g in reg.filters
+        if g.name != name
+            list.push(out, g)
+    TeraFilters { filters: out }
 
 // filter_names is every name in the set, sorted.
 //
 // For a diagnostic — an unknown filter's error carries a suggestion,
 // and the suggestion is found in this list — and for a caller
 // documenting what its templates may use.
-pub fn filter_names(fs: TeraFilters) -> [Str] []
-    todo("tera-nv.terafilter.filter_names")
+pub fn filter_names(reg: TeraFilters) -> [Str] []
+    var out: [Str] = []
+    for g in reg.filters
+        list.push(out, g.name)
+    list.sort(out)
+    out
 
 // get is a filter by name.
-pub fn get(fs: TeraFilters, name: Str) -> ?TeraFilter []
-    todo("tera-nv.terafilter.get")
+pub fn get(reg: TeraFilters, name: Str) -> ?TeraFilter []
+    for g in reg.filters
+        if g.name == name
+            return Some(g)
+    None
 
 // filter builds a `TeraFilter` from a name and a function.
 //
@@ -117,7 +170,7 @@ pub fn get(fs: TeraFilters, name: Str) -> ?TeraFilter []
 // it.
 pub fn filter(name: Str,
               apply: fn(teraval.TeraValue, [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>) -> TeraFilter []
-    todo("tera-nv.terafilter.filter")
+    TeraFilter { name: name, apply: apply }
 
 // refuse builds the error a filter returns when it will not accept its
 // input.
@@ -127,7 +180,9 @@ pub fn filter(name: Str,
 // hand-built error would be a filter whose message did not match the
 // others.
 pub fn refuse(name: Str, wanted: Str, got: teraval.TeraValue) -> teraerror.TeraError []
-    todo("tera-nv.terafilter.refuse")
+    let span = teraerror.TeraSpan { template: "", line: 1, column: 1, offset: 0 }
+    teraerror.TeraError { kind: ErrorFilterRefused(name, wanted + ", got " + teraval.type_name(got)),
+                          at: span, chain: [] }
 
 // ── Tests, which are a different registry ────────────────────────────
 //
@@ -156,12 +211,670 @@ pub struct TeraTests
 // ask about a variable that is not there, because reading one is an
 // error.
 pub fn builtin_tests() -> TeraTests []
-    todo("tera-nv.terafilter.builtin_tests")
+    var ts: [TeraTest] = []
+    list.push(ts, TeraTest { name: "defined", check: t_defined })
+    list.push(ts, TeraTest { name: "undefined", check: t_undefined })
+    list.push(ts, TeraTest { name: "null", check: t_null })
+    list.push(ts, TeraTest { name: "string", check: t_string })
+    list.push(ts, TeraTest { name: "number", check: t_number })
+    list.push(ts, TeraTest { name: "odd", check: t_odd })
+    list.push(ts, TeraTest { name: "even", check: t_even })
+    list.push(ts, TeraTest { name: "divisibleby", check: t_divisibleby })
+    list.push(ts, TeraTest { name: "starting_with", check: t_starting_with })
+    list.push(ts, TeraTest { name: "ending_with", check: t_ending_with })
+    list.push(ts, TeraTest { name: "containing", check: t_containing })
+    list.push(ts, TeraTest { name: "matching", check: t_matching })
+    TeraTests { tests: ts }
 
 // with_test is the set with one more test.
 pub fn with_test(ts: TeraTests, t: TeraTest) -> TeraTests []
-    todo("tera-nv.terafilter.with_test")
+    var out: [TeraTest] = []
+    var placed = false
+    for u in ts.tests
+        if u.name == t.name
+            list.push(out, t)
+            placed = true
+        else
+            list.push(out, u)
+    if not placed
+        list.push(out, t)
+    TeraTests { tests: out }
 
 // test_names is every test name, sorted.
 pub fn test_names(ts: TeraTests) -> [Str] []
-    todo("tera-nv.terafilter.test_names")
+    var out: [Str] = []
+    for u in ts.tests
+        list.push(out, u.name)
+    list.sort(out)
+    out
+
+// ── What the builtins share ───────────────────────────────────────────
+
+fn ok_str(t: Str) -> Result<teraval.TeraValue, teraerror.TeraError>
+    Ok(ValueStr(t))
+
+// The text of a string value, or the refusal for any other.
+fn text_of(name: Str, v: teraval.TeraValue) -> Result<Str, teraerror.TeraError>
+    match v
+        ValueStr(t) =>
+            Ok(t)
+        _           =>
+            Err(refuse(name, "a string", v))
+
+// The integer in argument `i`, or `fallback` when the template gave
+// fewer arguments.
+fn int_arg(name: Str, args: [teraval.TeraValue], i: Int,
+           fallback: Int) -> Result<Int, teraerror.TeraError>
+    if i >= list.len(args)
+        return Ok(fallback)
+    match args[i]
+        ValueInt(n) =>
+            Ok(n)
+        other       =>
+            Err(refuse(name, "an integer argument", other))
+
+fn str_arg(name: Str, args: [teraval.TeraValue], i: Int,
+           fallback: Str) -> Result<Str, teraerror.TeraError>
+    if i >= list.len(args)
+        return Ok(fallback)
+    match args[i]
+        ValueStr(t) =>
+            Ok(t)
+        other       =>
+            Err(refuse(name, "a string argument", other))
+
+// ── Text ──────────────────────────────────────────────────────────────
+
+fn f_upper(v: teraval.TeraValue,
+           args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    ok_str(str.upper(text_of("upper", v)!))
+
+fn f_lower(v: teraval.TeraValue,
+           args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    ok_str(str.lower(text_of("lower", v)!))
+
+fn f_capitalize(v: teraval.TeraValue,
+                args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let chars = str.chars(text_of("capitalize", v)!)
+    if list.len(chars) == 0
+        return ok_str("")
+    ok_str(str.upper(chars[0]) + str.lower(str.join(list.drop(chars, 1), "")))
+
+// Each word starts with a capital and goes on in lower case.  A word
+// starts after whitespace, a hyphen or an opening bracket.
+fn f_title(v: teraval.TeraValue,
+           args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    var parts: [Str] = []
+    var start = true
+    for c in str.chars(text_of("title", v)!)
+        if start
+            list.push(parts, str.upper(c))
+        else
+            list.push(parts, str.lower(c))
+        start = str.contains(" \t\n\r-({[<", c)
+    ok_str(str.join(parts, ""))
+
+fn f_trim(v: teraval.TeraValue,
+          args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    ok_str(str.trim(text_of("trim", v)!))
+
+fn f_trim_start(v: teraval.TeraValue,
+                args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    ok_str(str.trim_start(text_of("trim_start", v)!))
+
+fn f_trim_end(v: teraval.TeraValue,
+              args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    ok_str(str.trim_end(text_of("trim_end", v)!))
+
+// The first `n` characters; a second argument is added when something
+// was cut off.
+fn f_truncate(v: teraval.TeraValue,
+              args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let text = text_of("truncate", v)!
+    let n = int_arg("truncate", args, 0, 255)!
+    let end = str_arg("truncate", args, 1, "")!
+    let chars = str.chars(text)
+    if list.len(chars) <= n
+        return ok_str(text)
+    ok_str(str.join(list.take(chars, n), "") + end)
+
+fn f_wordcount(v: teraval.TeraValue,
+               args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    Ok(ValueInt(list.len(str.words(text_of("wordcount", v)!))))
+
+fn f_replace(v: teraval.TeraValue,
+             args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let text = text_of("replace", v)!
+    let from = str_arg("replace", args, 0, "")!
+    let to = str_arg("replace", args, 1, "")!
+    if from == ""
+        return ok_str(text)
+    ok_str(str.replace(text, from, to))
+
+// Every line after the first, unless blank, gets `n` spaces in front.
+fn f_indent(v: teraval.TeraValue,
+            args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let text = text_of("indent", v)!
+    let pad = str.repeat(" ", int_arg("indent", args, 0, 4)!)
+    var lines: [Str] = []
+    for line in str.split(text, "\n")
+        if list.len(lines) > 0 and line != ""
+            list.push(lines, pad + line)
+        else
+            list.push(lines, line)
+    ok_str(str.join(lines, "\n"))
+
+// Each newline becomes `<br>`.
+fn f_linebreaks(v: teraval.TeraValue,
+                args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let text = text_of("linebreaks", v)!
+    ok_str(str.replace(str.replace(text, "\r\n", "<br>"), "\n", "<br>"))
+
+// Everything from a `<` to the next `>` is dropped.
+fn f_striptags(v: teraval.TeraValue,
+               args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let text = text_of("striptags", v)!
+    let sb = str.builder_new()
+    var inside = false
+    for i in 0..str.len(text)
+        let b = str.byte_at_or(text, i, 0)
+        if b == '<'
+            inside = true
+        else if b == '>' and inside
+            inside = false
+        else if not inside
+            str.builder_append_char(sb, b)
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    ok_str(out)
+
+// Lower-case ASCII letters and digits, with every other run of bytes
+// one hyphen, and no hyphen at either end.
+fn f_slugify(v: teraval.TeraValue,
+             args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let text = str.lower(text_of("slugify", v)!)
+    let sb = str.builder_new()
+    var pending = false
+    for i in 0..str.len(text)
+        let b = str.byte_at_or(text, i, 0)
+        if b >= 'a' and b <= 'z' or b >= '0' and b <= '9'
+            if pending and str.builder_len(sb) > 0
+                str.builder_append_char(sb, '-')
+            pending = false
+            str.builder_append_char(sb, b)
+        else
+            pending = true
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    ok_str(out)
+
+// ── Collections ───────────────────────────────────────────────────────
+
+fn f_length(v: teraval.TeraValue,
+            args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    match v
+        ValueStr(t)   =>
+            Ok(ValueInt(list.len(str.chars(t))))
+        ValueList(xs) =>
+            Ok(ValueInt(list.len(xs)))
+        ValueMap(ps)  =>
+            Ok(ValueInt(list.len(ps)))
+        _             =>
+            Err(refuse("length", "a string, a list or a map", v))
+
+// The items of a list, or the characters of a string as strings.
+fn items_of(name: Str, v: teraval.TeraValue) -> Result<[teraval.TeraValue], teraerror.TeraError>
+    match v
+        ValueList(xs) =>
+            Ok(list.clone(xs))
+        ValueStr(t)   =>
+            var out: [teraval.TeraValue] = []
+            for c in str.chars(t)
+                list.push(out, ValueStr(c))
+            Ok(out)
+        _             =>
+            Err(refuse(name, "a list or a string", v))
+
+fn f_first(v: teraval.TeraValue,
+           args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let xs = items_of("first", v)!
+    if list.len(xs) == 0
+        return Ok(ValueNull)
+    Ok(xs[0])
+
+fn f_last(v: teraval.TeraValue,
+          args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let xs = items_of("last", v)!
+    if list.len(xs) == 0
+        return Ok(ValueNull)
+    Ok(xs[list.len(xs) - 1])
+
+fn f_nth(v: teraval.TeraValue,
+         args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let xs = items_of("nth", v)!
+    let n = int_arg("nth", args, 0, 0)!
+    if n < 0 or n >= list.len(xs)
+        return Ok(ValueNull)
+    Ok(xs[n])
+
+// A string reverses by characters and a list by items.
+fn f_reverse(v: teraval.TeraValue,
+             args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let xs = items_of("reverse", v)!
+    var out: [teraval.TeraValue] = []
+    for i in 0..list.len(xs)
+        list.push(out, xs[list.len(xs) - 1 - i])
+    match v
+        ValueStr(_) =>
+            var parts: [Str] = []
+            for x in out
+                list.push(parts, teraval.to_display(x))
+            ok_str(str.join(parts, ""))
+        _           =>
+            Ok(ValueList(out))
+
+fn f_join(v: teraval.TeraValue,
+          args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let xs = items_of("join", v)!
+    let sep = str_arg("join", args, 0, "")!
+    var parts: [Str] = []
+    for x in xs
+        list.push(parts, teraval.to_display(x))
+    ok_str(str.join(parts, sep))
+
+// What an item is ordered by: the item, or its field when the template
+// named one.
+fn sort_key(item: teraval.TeraValue, attr: Str) -> Result<teraval.TeraValue, teraerror.TeraError>
+    if attr == ""
+        return Ok(item)
+    teraval.lookup(item, attr)
+
+fn f_sort(v: teraval.TeraValue,
+          args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let xs = items_of("sort", v)!
+    let attr = str_arg("sort", args, 0, "")!
+    var keys: [teraval.TeraValue] = []
+    for x in xs
+        list.push(keys, sort_key(x, attr)!)
+    var order: [Int] = []
+    for i in 0..list.len(xs)
+        list.push(order, i)
+    let sorted = merge_sort(keys, order)
+    var out: [teraval.TeraValue] = []
+    for i in sorted
+        if i < 0
+            return Err(refuse("sort", "values of one kind", ValueList(xs)))
+        list.push(out, xs[i])
+    Ok(ValueList(out))
+
+// The indices in `order`, arranged by the keys they point at.  The
+// list is `[-1]` when two keys cannot be ordered.  The merge takes the
+// left key on a tie, so equal keys keep their order.
+fn merge_sort(keys: [teraval.TeraValue], order: [Int]) -> [Int]
+    if list.len(order) < 2
+        return list.clone(order)
+    let mid = list.len(order) / 2
+    let left = merge_sort(keys, list.take(order, mid))
+    let right = merge_sort(keys, list.drop(order, mid))
+    if list.contains(left, -1) or list.contains(right, -1)
+        return [-1]
+    var out: [Int] = []
+    var i = 0
+    var j = 0
+    while i < list.len(left) or j < list.len(right)
+        if j >= list.len(right)
+            list.push(out, left[i])
+            i = i + 1
+        else if i >= list.len(left)
+            list.push(out, right[j])
+            j = j + 1
+        else
+            match teraval.compare(keys[right[j]], keys[left[i]])
+                None    =>
+                    return [-1]
+                Some(c) =>
+                    if c < 0
+                        list.push(out, right[j])
+                        j = j + 1
+                    else
+                        list.push(out, left[i])
+                        i = i + 1
+    out
+
+fn f_unique(v: teraval.TeraValue,
+            args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let xs = items_of("unique", v)!
+    var out: [teraval.TeraValue] = []
+    for x in xs
+        var seen = false
+        for y in out
+            if teraval.equals(x, y)
+                seen = true
+        if not seen
+            list.push(out, x)
+    Ok(ValueList(out))
+
+// Items `start` up to but not including `end`, clamped to the list;
+// without an end, to the end.
+fn f_slice(v: teraval.TeraValue,
+           args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let xs = items_of("slice", v)!
+    let n = list.len(xs)
+    let start = clamp(int_arg("slice", args, 0, 0)!, n)
+    let end = clamp(int_arg("slice", args, 1, n)!, n)
+    var out: [teraval.TeraValue] = []
+    for i in start..end
+        list.push(out, xs[i])
+    match v
+        ValueStr(_) =>
+            var parts: [Str] = []
+            for x in out
+                list.push(parts, teraval.to_display(x))
+            ok_str(str.join(parts, ""))
+        _           =>
+            Ok(ValueList(out))
+
+fn clamp(i: Int, n: Int) -> Int
+    if i < 0
+        return 0
+    if i > n
+        return n
+    i
+
+fn f_map(v: teraval.TeraValue,
+         args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let xs = items_of("map", v)!
+    let attr = str_arg("map", args, 0, "")!
+    var out: [teraval.TeraValue] = []
+    for x in xs
+        list.push(out, teraval.lookup(x, attr)!)
+    Ok(ValueList(out))
+
+// The items whose field equals the value; an item without the field is
+// left out.
+fn f_filter(v: teraval.TeraValue,
+            args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let xs = items_of("filter", v)!
+    let attr = str_arg("filter", args, 0, "")!
+    var want = ValueNull
+    if list.len(args) > 1
+        want = args[1]
+    var out: [teraval.TeraValue] = []
+    for x in xs
+        match teraval.lookup(x, attr)
+            Ok(got) =>
+                if teraval.equals(got, want)
+                    list.push(out, x)
+            Err(_)  =>
+                continue
+    Ok(ValueList(out))
+
+// A map from each value of a field to the items that have it, in the
+// order the values first appear.
+fn f_group_by(v: teraval.TeraValue,
+              args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let xs = items_of("group_by", v)!
+    let attr = str_arg("group_by", args, 0, "")!
+    var keys: [Str] = []
+    var groups: [[teraval.TeraValue]] = []
+    for x in xs
+        let key = teraval.to_display(teraval.lookup(x, attr)!)
+        var at = -1
+        for i in 0..list.len(keys)
+            if keys[i] == key
+                at = i
+        if at < 0
+            list.push(keys, key)
+            list.push(groups, [])
+            at = list.len(keys) - 1
+        list.push(groups[at], x)
+    var pairs: [teraval.TeraPair] = []
+    for i in 0..list.len(keys)
+        list.push(pairs, teraval.TeraPair { key: keys[i], value: ValueList(groups[i]) })
+    Ok(ValueMap(pairs))
+
+// ── Numbers ───────────────────────────────────────────────────────────
+
+fn f_abs(v: teraval.TeraValue,
+         args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    match v
+        ValueInt(n)   =>
+            Ok(ValueInt(math.abs_int(n)))
+        ValueFloat(f) =>
+            Ok(ValueFloat(math.abs(f)))
+        _             =>
+            Err(refuse("abs", "a number", v))
+
+// Halves round away from zero.  An int stays an int.
+fn f_round(v: teraval.TeraValue,
+           args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let places = int_arg("round", args, 0, 0)!
+    match v
+        ValueInt(_)   =>
+            Ok(v)
+        ValueFloat(f) =>
+            Ok(ValueFloat(round_to(f, places)))
+        _             =>
+            Err(refuse("round", "a number", v))
+
+fn round_to(f: Float, places: Int) -> Float
+    let factor = math.pow(10.0, places as Float)
+    let y = f * factor
+    if y < 0.0
+        return math.ceil(y - 0.5) / factor
+    math.floor(y + 0.5) / factor
+
+// A number as an int, cutting a fraction off; a string is read, and
+// anything that is not a number is the argument, or 0.
+fn f_int(v: teraval.TeraValue,
+         args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let fallback = int_arg("int", args, 0, 0)!
+    match v
+        ValueInt(_)   =>
+            Ok(v)
+        ValueFloat(f) =>
+            Ok(ValueInt(f as Int))
+        ValueBool(b)  =>
+            if b
+                return Ok(ValueInt(1))
+            Ok(ValueInt(0))
+        ValueStr(t)   =>
+            Ok(ValueInt(int_of_text(str.trim(t), fallback)))
+        _             =>
+            Ok(ValueInt(fallback))
+
+fn int_of_text(t: Str, fallback: Int) -> Int
+    match str.to_int(t)
+        Some(n) =>
+            n
+        None    =>
+            match str.to_float(t)
+                Some(f) =>
+                    f as Int
+                None    =>
+                    fallback
+
+fn f_float(v: teraval.TeraValue,
+           args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    match v
+        ValueFloat(_) =>
+            Ok(v)
+        ValueInt(n)   =>
+            Ok(ValueFloat(n as Float))
+        ValueStr(t)   =>
+            Ok(ValueFloat(str.to_float(str.trim(t)) ?? 0.0))
+        _             =>
+            Ok(ValueFloat(0.0))
+
+// Bytes in powers of a thousand: `999 Bytes`, `1.0 kB`, `1.5 MB`.
+fn f_filesizeformat(v: teraval.TeraValue,
+                    args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    match v
+        ValueInt(n)   =>
+            ok_str(size_text(n as Float))
+        ValueFloat(f) =>
+            ok_str(size_text(f))
+        _             =>
+            Err(refuse("filesizeformat", "a number", v))
+
+fn size_text(bytes: Float) -> Str
+    if bytes == 1.0
+        return "1 Byte"
+    if bytes < 1000.0
+        return str.from_int(bytes as Int) + " Bytes"
+    let units = ["kB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"]
+    var size = bytes / 1000.0
+    var at = 0
+    while size >= 1000.0 and at < 7
+        size = size / 1000.0
+        at = at + 1
+    one_decimal(size) + " " + units[at]
+
+fn one_decimal(f: Float) -> Str
+    let tenths = math.floor(f * 10.0 + 0.5) as Int
+    str.from_int(tenths / 10) + "." + str.from_int(tenths % 10)
+
+// ── Escaping and encoding ─────────────────────────────────────────────
+
+fn f_escape(v: teraval.TeraValue,
+            args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    ok_str(htmlsafe.escape_attr_str(teraval.to_display(v)))
+
+// The five characters, with `&apos;` for the apostrophe as XML spells it.
+fn f_escape_xml(v: teraval.TeraValue,
+                args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let t = teraval.to_display(v)
+    ok_str(str.replace(str.replace(str.replace(str.replace(str.replace(t, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"),
+        "\"",
+        "&quot;"),
+    "'", "&apos;"))
+
+// The value, unchanged.  The renderer reads the name: a chain with
+// `safe` in it is not escaped on the way out.
+fn f_safe(v: teraval.TeraValue,
+          args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    Ok(v)
+
+fn f_urlencode(v: teraval.TeraValue,
+               args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    ok_str(percent(teraval.to_display(v), "-_.~/"))
+
+fn f_urlencode_strict(v: teraval.TeraValue,
+                      args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    ok_str(percent(teraval.to_display(v), "-_.~"))
+
+// Every byte but a letter, a digit and the bytes in `keep`, as `%XX`.
+fn percent(t: Str, keep: Str) -> Str
+    let sb = str.builder_new()
+    let digits = "0123456789ABCDEF"
+    for i in 0..str.len(t)
+        let b = str.byte_at_or(t, i, 0)
+        if b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z' or b >= '0' and b <= '9' or str.contains(keep, str.from_byte(b))
+            str.builder_append_char(sb, b)
+        else
+            str.builder_append_char(sb, '%')
+            str.builder_append(sb, str.slice(digits, b / 16, b / 16 + 1))
+            str.builder_append(sb, str.slice(digits, b % 16, b % 16 + 1))
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+fn f_json_encode(v: teraval.TeraValue,
+                 args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    ok_str(teraval.to_json(v))
+
+// ── Absence ───────────────────────────────────────────────────────────
+
+// The argument in place of null, or in place of any false value when
+// the second argument is true.
+fn f_default(v: teraval.TeraValue,
+             args: [teraval.TeraValue]) -> Result<teraval.TeraValue, teraerror.TeraError>
+    var fallback = ValueStr("")
+    if list.len(args) > 0
+        fallback = args[0]
+    var any_false = false
+    if list.len(args) > 1
+        any_false = teraval.is_truthy(args[1])
+    match v
+        ValueNull =>
+            Ok(fallback)
+        _         =>
+            if any_false and not teraval.is_truthy(v)
+                return Ok(fallback)
+            Ok(v)
+
+// ── Tests ─────────────────────────────────────────────────────────────
+
+// The renderer answers `defined` and `undefined` for a name that is not
+// there; these two answer for a value that is.
+fn t_defined(v: teraval.TeraValue, args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    Ok(true)
+
+fn t_undefined(v: teraval.TeraValue, args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    Ok(false)
+
+fn t_null(v: teraval.TeraValue, args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    Ok(teraval.type_name(v) == "null")
+
+fn t_string(v: teraval.TeraValue, args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    Ok(teraval.type_name(v) == "string")
+
+fn t_number(v: teraval.TeraValue, args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    Ok(teraval.type_name(v) == "int" or teraval.type_name(v) == "float")
+
+fn int_of(name: Str, v: teraval.TeraValue) -> Result<Int, teraerror.TeraError>
+    match v
+        ValueInt(n) =>
+            Ok(n)
+        _           =>
+            Err(refuse(name, "an int", v))
+
+fn t_odd(v: teraval.TeraValue, args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    Ok(int_of("odd", v)! % 2 != 0)
+
+fn t_even(v: teraval.TeraValue, args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    Ok(int_of("even", v)! % 2 == 0)
+
+fn t_divisibleby(v: teraval.TeraValue,
+                 args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    let n = int_of("divisibleby", v)!
+    let d = int_arg("divisibleby", args, 0, 0)!
+    if d == 0
+        return Err(refuse("divisibleby", "a divisor other than 0", ValueInt(d)))
+    Ok(n % d == 0)
+
+fn t_starting_with(v: teraval.TeraValue,
+                   args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    Ok(str.starts_with(text_of("starting_with", v)!, str_arg("starting_with", args, 0, "")!))
+
+fn t_ending_with(v: teraval.TeraValue,
+                 args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    Ok(str.ends_with(text_of("ending_with", v)!, str_arg("ending_with", args, 0, "")!))
+
+// A string holds a substring, a list holds an item, a map holds a key.
+fn t_containing(v: teraval.TeraValue,
+                args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    var want = ValueNull
+    if list.len(args) > 0
+        want = args[0]
+    match v
+        ValueStr(t)   =>
+            Ok(str.contains(t, text_of("containing", want)!))
+        ValueList(xs) =>
+            for x in xs
+                if teraval.equals(x, want)
+                    return Ok(true)
+            Ok(false)
+        ValueMap(_)   =>
+            Ok(teraval.step(v, text_of("containing", want)!) != None)
+        _             =>
+            Err(refuse("containing", "a string, a list or a map", v))
+
+fn t_matching(v: teraval.TeraValue, args: [teraval.TeraValue]) -> Result<Bool, teraerror.TeraError>
+    let text = text_of("matching", v)!
+    let pattern = str_arg("matching", args, 0, "")!
+    match regex.error(pattern)
+        Some(why) =>
+            Err(refuse("matching", "a pattern that compiles (" + why + ")", ValueStr(pattern)))
+        None      =>
+            Ok(regex.is_match(pattern, text))

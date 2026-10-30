@@ -5,6 +5,65 @@ All notable changes to tera-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.0 — 2026-10-29
+
+First implementation of the interface published as 0.0.x.
+
+### Added
+
+- The parser, the renderer, the builtin filters and tests, the set and
+  the error reports. Every function of the five modules has a body.
+- `teraerror.span_at` and `teraerror.nearest`, which the parser and the
+  renderer share and a host may call: the line and column of an
+  offset, and the registered name within two edits of a misspelled one.
+- `teraval.step`, one path segment applied to a value, which `lookup`
+  and the renderer are built on.
+- `teracompile` and `teranode`, the parser and the tree it makes. They
+  are package-internal; no program is meant to call them.
+- `tools/oracle.py` and `tools/syntax.py`, which write
+  `tests/oracle_tests.nv` and `tests/syntax_tests.nv`, and
+  `tests/coverage.sh`, which measures 100% of the lines under `src/`.
+
+### Changed
+
+- `TeraTemplate.program` is now `teranode.TeraProgram` and not
+  `[Int]`. The type was documented as private. This is a breaking
+  change to anything that constructed one.
+- The parameter of `with_filter`, `without_filter`, `filter_names` and
+  `get` that was named `fs` is named `reg`. Calls are unaffected.
+- `ErrorUnknownFilter` also reports an unknown test, and
+  `ErrorUnexpectedTag("block <name>")` is what `set_check` answers for a
+  block a child overrides and no parent defines. `ErrorNoSuchField`
+  also reports a missing macro, a `super()` with no parent block and a
+  block `render_block` could not find.
+
+### Decisions the interface left open
+
+- A filter chain that contains `safe`, `escape` or `escape_xml`, and the
+  result of a macro or of `super()`, is not escaped again.
+- `render_one` autoescapes, and names its template `template`.
+- `upper`, `lower`, `capitalize` and `title` change ASCII letters only.
+- `truncate(n)` keeps `n` characters and adds the optional second
+  argument only when it cut. `indent(n)` is `n` spaces and leaves the
+  first line and blank lines alone.
+- A filter's arguments are taken by position. A name before `=` is
+  accepted and ignored, so a template written for Tera's named
+  arguments parses.
+- `for k, v in list` binds the index and the item. One name over a map
+  binds the key.
+- Tera's behaviour in the places the two languages differ was taken
+  from the interface's documentation; the Tera documentation was not
+  available. `tests/lang_tests.nv` and `tests/filter_tests.nv` state
+  the rule each expected value follows.
+
+### Known
+
+- A call through a function-valued struct field whose match arm returns
+  from inside a `for` loop leaks one object. The registry lookup in
+  `terarender` is written as a lookup followed by a call for that
+  reason, which is also the plainer shape. The filing is
+  `memory-perceus/a-return-in-a-match-arm-on-a-call-through-a-struct-field-leaks-in-a-loop`.
+
 ## 0.0.3 — 2026-09-28
 
 The dependency ranges move to the dependencies' current releases.  A

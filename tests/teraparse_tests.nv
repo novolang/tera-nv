@@ -1,16 +1,9 @@
-// teraparse_tests.nv — the API suite for the template set, the
-// inheritance, and the errors.
+// teraparse_tests.nv — the template set, inheritance, and error reports.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`.
-//
-// THIS IS THE SUITE FOR THE SANS-IO CLAIM.  `{% extends %}` needs
-// another template and a `core` package cannot open a file, so the
-// whole of how that works is `set_missing` and the host loop around
-// it — and if that shape is wrong, the package's layer is wrong.
-//
-// AND FOR THE ERROR REPORTS, because a template error that does not
-// name a line is not an error report, and one that does not name the
-// include chain describes the wrong file.
+// `{% extends %}` needs another template and this package opens no
+// file, so `set_missing` and the host loop around it are how a template
+// gets its parent. The first cases are that loop. The last are the
+// error reports, which name the line and the include chain.
 
 use std.test
 use std.list
@@ -39,7 +32,7 @@ fn set_of(pairs: [teraerror.TeraSource]) -> teraparse.TeraSet [io]
 
 @test
 fn test_set_missing_is_how_a_core_package_asks_for_a_file() [io]
-    // The load-bearing interface: the core says what it needs, the
+    // The package says what it needs, the
     // host reads it and adds it, and the loop runs until nothing is
     // missing.
     let one = set_of([TeraSource { name: "page.html",
@@ -99,7 +92,7 @@ fn test_a_computed_include_name_cannot_be_reported_before_the_render() [io]
 fn unwrap(t: ?teraparse.TeraTemplate) -> teraparse.TeraTemplate
     match t
         None    =>
-            todo("teraparse_tests.unwrap — the set did not hold the template")
+            core.panic.panic("teraparse_tests.unwrap: the set did not hold the template")
         Some(v) =>
             v
 
@@ -237,3 +230,50 @@ fn test_the_chain_is_half_the_error_report() [io]
 
             test.case("and a host asks one question of an error without matching on it")
             test.assert(teraerror.missing_template(e) == None)
+
+@test
+fn test_the_set_replaces_by_name_and_reports_what_it_cannot_resolve() [io]
+    test.case("a template added under a name already there replaces it, in the same place")
+    let first = set_of([TeraSource { name: "a.html", text: "one" }, TeraSource { name: "b.html", text: "b" }])
+    let second = add_or_keep(first, "a.html", "two")
+    test.assert(teraparse.set_names(second) == ["a.html", "b.html"])
+    test.assert(teraparse.template_source(unwrap(teraparse.set_get(second, "a.html"))) == "two")
+    test.assert(teraparse.set_get(second, "c.html") == None)
+
+    test.case("set_add reports a template that does not parse and leaves the set as it was")
+    match teraparse.set_add(first, "bad.html", "{% if %}")
+        Ok(_)  => test.assert(false)
+        Err(_) => test.assert(teraparse.set_names(first) == ["a.html", "b.html"])
+
+    test.case("a template that extends nothing has no extends_name")
+    test.assert(teraparse.extends_name(unwrap(teraparse.set_get(first, "a.html"))) == None)
+
+    test.case("set_check reports a parent the set does not hold, at the extends tag")
+    let orphan = set_of([TeraSource { name: "c.html", text: "x\n{% extends \"gone.html\" %}" }])
+    let errs = teraparse.set_check(orphan)
+    test.assert(list.len(errs) == 1)
+    test.assert(teraerror.missing_template(errs[0]) == Some("gone.html"))
+    test.assert(errs[0].at.line == 2)
+
+    test.case("set_check reports a cycle that does not pass through the template itself")
+    let tail = set_of([TeraSource { name: "a.html", text: "{% extends \"b.html\" %}" },
+                       TeraSource { name: "b.html", text: "{% extends \"c.html\" %}" },
+                       TeraSource { name: "c.html", text: "{% extends \"b.html\" %}" }])
+    test.assert(list.len(teraparse.set_check(tail)) == 3)
+
+    test.case("a block found two levels up is not a hole")
+    let deep = set_of([TeraSource { name: "r.html", text: "{% block x %}{% endblock %}" },
+                       TeraSource { name: "m.html", text: "{% extends \"r.html\" %}" },
+                       TeraSource { name: "t.html", text: "{% extends \"m.html\" %}{% block x %}{% endblock %}" }])
+    test.assert(list.len(teraparse.set_check(deep)) == 0)
+
+    test.case("the template facts: references, blocks, variables, filters, in the order met")
+    match teraparse.parse("p.html", "{% extends \"b.html\" %}{% import \"m.html\" as m %}{% include \"i.html\" %}"
+                                    + "{% include v %}{% block one %}{{ a | f | g }}{{ b | f }}{% endblock %}"
+                                    + "{% block two %}{% for x in a %}{{ x }}{% endfor %}{% endblock %}")
+        Err(_) => test.assert(false)
+        Ok(t)  =>
+            test.assert(teraparse.references(t) == ["b.html", "m.html", "i.html"])
+            test.assert(teraparse.blocks(t) == ["one", "two"])
+            test.assert(teraparse.variables(t) == ["v", "a", "b", "x"])
+            test.assert(teraparse.filters_used(t) == ["f", "g"])

@@ -1,12 +1,9 @@
-// teraval_tests.nv — the API suite for the values and the context.
+// teraval_tests.nv — the values and the context.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`.
-//
-// THE VALUE MODEL IS WHERE A TEMPLATE ENGINE'S SURPRISES LIVE.  Every
-// case here is one a template author will meet and be unable to
-// explain without the rule written down: why `3` and not `3.0`, why
-// the map iterated in that order, why `{{ items }}` printed JSON, and
-// what `{% if %}` decided on.
+// Each case is a rule a template author meets and cannot explain
+// without it written down: why `3` and not `3.0`, why a map iterated in
+// that order, why `{{ items }}` printed JSON, and what `{% if %}`
+// decided on.
 
 use std.test
 use std.list
@@ -167,3 +164,89 @@ fn test_compare_refuses_to_order_values_of_different_kinds() [io]
 
     test.case("and a string against a number is not an ordering question")
     test.assert(teraval.compare(ValueStr("a"), ValueInt(1)) == None)
+
+@test
+fn test_lookup_edge_cases() [io]
+    let user = ValueMap([TeraPair { key: "name", value: ValueStr("n") },
+                         TeraPair { key: "tags", value: ValueList([ValueStr("a")]) }])
+
+    test.case("an empty path is the value itself")
+    test.assert(teraval.lookup(user, "") == Ok(user))
+
+    test.case("a path that goes through a string cannot continue, and says what it was")
+    match teraval.lookup(user, "name.first")
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            match e.kind
+                ErrorFilterRefused(f, why) =>
+                    test.assert(f == "lookup")
+                    test.assert(why == "a map or a list, got string")
+                _                          => test.assert(false)
+
+    test.case("a list takes an integer and nothing else, and the path so far names the miss")
+    match teraval.lookup(user, "tags.x")
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            match e.kind
+                ErrorNoSuchField(p) => test.assert(p == "tags.x")
+                _                   => test.assert(false)
+    test.assert(teraval.step(user, "tags") == Some(ValueList([ValueStr("a")])))
+    test.assert(teraval.step(ValueList([ValueInt(1)]), "-1") == None)
+    test.assert(teraval.step(ValueInt(1), "x") == None)
+
+@test
+fn test_truthiness_and_display_of_the_remaining_kinds() [io]
+    test.case("a bool is itself, a float is false only at zero")
+    test.assert(teraval.is_truthy(ValueBool(true)))
+    test.assert(teraval.is_truthy(ValueBool(false)) == false)
+    test.assert(teraval.is_truthy(ValueFloat(0.5)))
+    test.assert(teraval.is_truthy(ValueFloat(0.0)) == false)
+    test.assert(teraval.is_truthy(ValueMap([TeraPair { key: "a", value: ValueNull }])))
+
+    test.case("a bool displays as true or false and has the type name bool")
+    test.assert(teraval.to_display(ValueBool(true)) == "true")
+    test.assert(teraval.to_display(ValueBool(false)) == "false")
+    test.assert(teraval.type_name(ValueBool(true)) == "bool")
+    test.assert(teraval.type_name(ValueNull) == "null")
+    test.assert(teraval.type_name(ValueStr("")) == "string")
+    test.assert(teraval.type_name(ValueMap([])) == "map")
+
+    test.case("a float with no JSON spelling is null in JSON")
+    let zero = 0.0
+    test.assert(teraval.to_json(ValueFloat(zero / zero)) == "null")
+    test.assert(teraval.to_json(ValueFloat(1.0 / zero)) == "null")
+
+    test.case("control characters below 0x20 are \\u escapes, in lower-case hex")
+    test.assert(teraval.to_json(ValueStr("\u{1f}")) == "\"\\u001f\"")
+
+@test
+fn test_equals_and_compare_for_every_pair_of_kinds() [io]
+    let m = ValueMap([TeraPair { key: "a", value: ValueInt(1) }])
+
+    test.case("null equals only null; a bool only the same bool; a string only the same string")
+    test.assert(teraval.equals(ValueNull, ValueNull))
+    test.assert(teraval.equals(ValueNull, ValueInt(0)) == false)
+    test.assert(teraval.equals(ValueBool(true), ValueBool(true)))
+    test.assert(teraval.equals(ValueBool(true), ValueBool(false)) == false)
+    test.assert(teraval.equals(ValueBool(true), ValueInt(1)) == false)
+    test.assert(teraval.equals(ValueStr("a"), ValueStr("a")))
+    test.assert(teraval.equals(ValueStr("a"), ValueStr("b")) == false)
+    test.assert(teraval.equals(ValueStr("1"), ValueInt(1)) == false)
+
+    test.case("a list needs the same length and equal items")
+    test.assert(teraval.equals(ValueList([ValueInt(1)]), ValueList([ValueInt(1), ValueInt(2)])) == false)
+    test.assert(teraval.equals(ValueList([ValueInt(1)]), ValueList([ValueInt(2)])) == false)
+    test.assert(teraval.equals(ValueList([]), m) == false)
+
+    test.case("a map needs the same keys with equal values")
+    test.assert(teraval.equals(m, ValueMap([])) == false)
+    test.assert(teraval.equals(m, ValueMap([TeraPair { key: "b", value: ValueInt(1) }])) == false)
+    test.assert(teraval.equals(m, ValueMap([TeraPair { key: "a", value: ValueInt(2) }])) == false)
+    test.assert(teraval.equals(m, ValueList([])) == false)
+
+    test.case("compare: equal strings are 0, a longer string with the same start is greater, a bool has no order")
+    test.assert(teraval.compare(ValueStr("a"), ValueStr("a")) == Some(0))
+    test.assert(teraval.compare(ValueStr("ab"), ValueStr("a")) == Some(1))
+    test.assert(teraval.compare(ValueBool(true), ValueBool(false)) == None)
+    test.assert(teraval.compare(ValueNull, ValueNull) == None)
+    test.assert(teraval.compare(ValueInt(1), ValueStr("a")) == None)

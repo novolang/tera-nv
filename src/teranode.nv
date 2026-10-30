@@ -1,0 +1,88 @@
+// teranode.nv — the tree a template is parsed into.
+//
+// Package-internal: `teraparse.TeraTemplate` holds these, and the
+// renderer walks them, and nothing else is meant to look inside.  A new
+// tag or expression form adds a variant here, so a caller must not
+// match on these types.
+
+use teraval
+
+// An expression, as written inside `{{ }}` or a tag.  `at` is the byte
+// offset of the expression in the template source, for error positions.
+pub enum TeraExpr
+    // A literal: a string, a number, a bool or null.
+    ExprLit(v: teraval.TeraValue)
+    // A variable by its first name.
+    ExprVar(name: Str, at: Int)
+    // `base.name`, which is also `base.0` for a list.
+    ExprField(base: TeraExpr, name: Str, at: Int)
+    // `base[key]`.
+    ExprIndex(base: TeraExpr, key: TeraExpr, at: Int)
+    // `[a, b]`.
+    ExprList(items: [TeraExpr])
+    // `base | name(args)`.
+    ExprFilter(base: TeraExpr, name: Str, args: [TeraExpr], at: Int)
+    // `subject is name(args)` and `subject is not name(args)`.
+    ExprTest(subject: TeraExpr, name: Str, args: [TeraExpr], negated: Bool, at: Int)
+    // A macro call.  `ns` is empty for a macro of the same template, an
+    // import alias otherwise; `names` holds a keyword's name or empty
+    // for each argument.
+    ExprCall(ns: Str, name: Str, args: [TeraExpr], names: [Str], at: Int)
+    // `not x`.
+    ExprNot(x: TeraExpr)
+    // `l op r` for `and`, `or`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`.
+    ExprBin(op: Str, l: TeraExpr, r: TeraExpr, at: Int)
+
+// One arm of an `if`.
+pub struct TeraBranch
+    cond: TeraExpr
+    body: [TeraNode]
+
+// One parameter of a macro.
+pub struct TeraParam
+    name: Str
+    has_default: Bool
+    default: TeraExpr
+
+// One piece of a template's body.
+pub enum TeraNode
+    // Text outside any tag.
+    NodeText(text: Str)
+    // `{{ expr }}`.
+    NodeOut(expr: TeraExpr, at: Int)
+    // `{% if %}` with its `elif` arms and its `else`.
+    NodeIf(arms: [TeraBranch], other: [TeraNode])
+    // `{% for key, value in iter %}`; `key` is empty with one name.
+    NodeFor(key: Str, value: Str, iter: TeraExpr, body: [TeraNode], other: [TeraNode], at: Int)
+    NodeSet(name: Str, expr: TeraExpr)
+    NodeInclude(expr: TeraExpr, at: Int)
+    NodeBlock(name: Str, body: [TeraNode], at: Int)
+    NodeMacro(name: Str, params: [TeraParam], body: [TeraNode])
+    // `{% import "file" as space %}`.
+    NodeImport(file: Str, space: Str)
+    // `{% filter name(args) %}body{% endfilter %}`.
+    NodeFilter(name: Str, args: [TeraExpr], body: [TeraNode], at: Int)
+
+// A block's body, found by name.
+pub struct TeraBlockDef
+    name: Str
+    body: [TeraNode]
+    at: Int
+
+// What a parse produces: the tree, and the facts a caller may ask of a
+// template without rendering it.
+pub struct TeraProgram
+    nodes: [TeraNode]
+    // The literal name after `extends`, or empty; `parent_at` is its
+    // tag's offset.
+    parent: Str
+    parent_at: Int
+    // Literal names of `extends`, `include` and `import`.
+    refs: [Str]
+    // The blocks this template defines, and where.
+    block_names: [Str]
+    block_ats: [Int]
+    defs: [TeraBlockDef]
+    // First names of every variable read, and every filter applied.
+    vars: [Str]
+    filters: [Str]

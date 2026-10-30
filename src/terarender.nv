@@ -1,40 +1,33 @@
 // terarender.nv — a template and a context into bytes the caller owns.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// `render` appends to the caller's buffer and returns it, so a site
+// generator renders many pages into one buffer and writes once, and a
+// test asserts on bytes with no file anywhere.
+//
+// Autoescaping is on for the names the set's rule selects, and the
+// escape is html-nv's `escape_attr`: `&`, `<`, `>`, `"` and `'`. A
+// template cannot tell whether a `{{ }}` sits inside an attribute, so
+// the attribute escape is used everywhere. `{{ x | safe }}` turns it
+// off for one value. The output of a macro, of `super()` and of a
+// chain that holds `safe`, `escape` or `escape_xml` is not escaped
+// again.
+//
+// The language has `{% if %}`, `{% elif %}`, `{% else %}`, `{% for %}`
+// with `{% else %}` for the empty case, `{% set %}`, `{% include %}`,
+// `{% extends %}` with `{% block %}` and `{{ super() }}`, `{% macro %}`
+// and `{% import %}`, `{% filter %}` blocks, `{% raw %}` and `{# #}`
+// comments. It has no `{% while %}`, no arithmetic, and no way to call
+// anything the caller did not register.
 
+use std.str
+use std.list
+use std.bytes
+use htmlsafe
 use teraval
 use teraparse
+use teranode
 use terafilter
 use teraerror
-
-// NOTHING HERE WRITES.  `render` appends to the caller's buffer and
-// returns it, so a site generator renders 58 pages into one buffer and
-// writes once, and a test asserts on bytes with no file anywhere.
-//
-// AUTOESCAPING IS ON, AND IT IS html-nv's ESCAPE.  A template engine
-// for the web whose default is not to escape is a template engine that
-// produces cross-site scripting, and a template engine whose escape
-// disagrees with the HTML package the same program uses is one where
-// two functions in one page escape differently.  `{{ x }}` in an
-// autoescaped template is `htmlsafe.escape_text`; `{{ x }}` inside an
-// attribute is not distinguishable from one outside it by a template
-// engine, so the escape used is the ATTRIBUTE one — five characters —
-// everywhere.  Escaping more than necessary is a rendering nobody
-// notices; escaping less is a hole.
-//
-// `{{ x | safe }}` TURNS IT OFF FOR ONE VALUE, and that is the whole
-// of the escape hatch.  A template that needs raw HTML says so at the
-// point it needs it, in a way a reviewer can grep for.
-//
-// THE CONTROL STRUCTURES ARE THE ONES A PAGE NEEDS AND NO MORE:
-// `{% if %}` / `{% elif %}` / `{% else %}`, `{% for %}` with `{% else %}`
-// for the empty case, `{% set %}`, `{% include %}`, `{% extends %}`
-// with `{% block %}` and `{{ super() }}`, `{% macro %}` and
-// `{% import %}`, `{% filter %}` blocks, `{% raw %}`, and `{# #}`
-// comments.  What is NOT there: no `{% while %}`, because a template
-// that can loop unboundedly is a template that can hang a render; no
-// arbitrary expression evaluation beyond the comparison and boolean
-// operators; and no way to call anything the caller did not register.
 
 // TeraRender is the result of a render that produced output.
 //
@@ -85,7 +78,7 @@ pub struct TeraRender
 pub fn render(out: [u8], set: teraparse.TeraSet, name: Str, ctx: teraval.TeraContext,
               filters: terafilter.TeraFilters,
               tests: terafilter.TeraTests) -> Result<TeraRender, teraerror.TeraError> []
-    todo("tera-nv.terarender.render")
+    render_with(out, set, name, ctx, filters, tests, teraparse.default_limits())
 
 // render_with is `render` with limits of the caller's choosing.
 //
@@ -94,7 +87,8 @@ pub fn render(out: [u8], set: teraparse.TeraSet, name: Str, ctx: teraval.TeraCon
 pub fn render_with(out: [u8], set: teraparse.TeraSet, name: Str, ctx: teraval.TeraContext,
                    filters: terafilter.TeraFilters, tests: terafilter.TeraTests,
                    limits: teraparse.TeraLimits) -> Result<TeraRender, teraerror.TeraError> []
-    todo("tera-nv.terarender.render_with")
+    let r = run(set, name, "", ctx, filters, tests, limits)!
+    Ok(TeraRender { out: list.concat(out, wire(r.text)), used: r.used, iterations: r.iterations })
 
 // render_str is `render` into a fresh string, with the builtin filters
 // and tests.
@@ -103,7 +97,9 @@ pub fn render_with(out: [u8], set: teraparse.TeraSet, name: Str, ctx: teraval.Te
 // which is the whole difference from `render`.
 pub fn render_str(set: teraparse.TeraSet, name: Str,
                   ctx: teraval.TeraContext) -> Result<Str, teraerror.TeraError> []
-    todo("tera-nv.terarender.render_str")
+    let r = run(set, name, "", ctx, terafilter.builtin_filters(), terafilter.builtin_tests(),
+                teraparse.default_limits())!
+    Ok(r.text)
 
 // render_one is a single template with no set at all.
 //
@@ -113,7 +109,8 @@ pub fn render_str(set: teraparse.TeraSet, name: Str,
 // `ErrorTemplateNotFound`, which is the honest answer rather than a
 // silent empty expansion.
 pub fn render_one(source: Str, ctx: teraval.TeraContext) -> Result<Str, teraerror.TeraError> []
-    todo("tera-nv.terarender.render_one")
+    let set = teraparse.set_add(teraparse.set_with(EscapeAlways), "template", source)!
+    render_str(set, "template", ctx)
 
 // escape is the escape an autoescaped template applies.
 //
@@ -123,11 +120,11 @@ pub fn render_one(source: Str, ctx: teraval.TeraContext) -> Result<Str, teraerro
 // renderer would have used.  A filter that escaped differently would
 // be a filter that produced a page with two escaping rules in it.
 pub fn escape(text: Str) -> Str []
-    todo("tera-nv.terarender.escape")
+    htmlsafe.escape_attr_str(text)
 
 // escape_into appends the escaped text to a caller's buffer.
 pub fn escape_into(out: [u8], text: Str) -> [u8] []
-    todo("tera-nv.terarender.escape_into")
+    htmlsafe.escape_attr(out, text)
 
 // loop_variable_names is the names available inside a `{% for %}`.
 //
@@ -138,7 +135,7 @@ pub fn escape_into(out: [u8], text: Str) -> [u8] []
 // `teraparse.variables` reports `loop` and a build-time check fails on
 // every template that has a `for` in it.
 pub fn loop_variable_names() -> [Str] []
-    todo("tera-nv.terarender.loop_variable_names")
+    ["loop.index", "loop.index0", "loop.first", "loop.last", "loop.length"]
 
 // missing is the template name an error says was not found, or `None`.
 //
@@ -158,7 +155,7 @@ pub fn loop_variable_names() -> [Str] []
 //             attempt = render(...)
 // ```
 pub fn missing(e: teraerror.TeraError) -> ?Str []
-    todo("tera-nv.terarender.missing")
+    teraerror.missing_template(e)
 
 // render_block renders one block of a template on its own.
 //
@@ -170,4 +167,682 @@ pub fn missing(e: teraerror.TeraError) -> ?Str []
 pub fn render_block(out: [u8], set: teraparse.TeraSet, name: Str, block: Str,
                     ctx: teraval.TeraContext, filters: terafilter.TeraFilters,
                     tests: terafilter.TeraTests) -> Result<TeraRender, teraerror.TeraError> []
-    todo("tera-nv.terarender.render_block")
+    let r = run(set, name, block, ctx, filters, tests, teraparse.default_limits())!
+    Ok(TeraRender { out: list.concat(out, wire(r.text)), used: r.used, iterations: r.iterations })
+
+// ── The renderer ──────────────────────────────────────────────────────
+//
+// One `Env` is one render.  Variables are two parallel lists used as a
+// stack: a lookup reads from the end, and a scope (a loop body, a macro)
+// ends by cutting the lists back to the length they had when it began.
+// `chain` is the templates of one inheritance chain, the one asked for
+// first and the root last, and `cur` is the one whose text is being
+// rendered, so that an error can name its position and a macro or
+// import can be looked up where it was written.
+
+struct Env
+    set: teraparse.TeraSet
+    filters: terafilter.TeraFilters
+    tests: terafilter.TeraTests
+    limits: teraparse.TeraLimits
+    escape: Bool
+    var names: [Str]
+    var values: [teraval.TeraValue]
+    var chain: [teraparse.TeraTemplate]
+    var cur: Int
+    // The block being rendered and the chain index its body came from,
+    // which is where `super()` goes on from.
+    var block: Str
+    var level: Int
+    var frames: [teraerror.TeraFrame]
+    var active: [Str]
+    var used: [Str]
+    var iterations: Int
+
+// What a render produced, before it is appended to the caller's bytes.
+struct Rendered
+    text: Str
+    used: [Str]
+    iterations: Int
+
+fn wire(s: Str) -> [u8]
+    bytes.to_byte_list(bytes.from_str(s))
+
+fn run(set: teraparse.TeraSet, name: Str, only: Str, ctx: teraval.TeraContext,
+       filters: terafilter.TeraFilters, tests: terafilter.TeraTests,
+       limits: teraparse.TeraLimits) -> Result<Rendered, teraerror.TeraError>
+    var st = Env { set: set, filters: filters, tests: tests, limits: limits,
+                    escape: teraparse.escapes_name(set, name), names: [], values: [],
+                    chain: [], cur: 0, block: "", level: 0, frames: [], active: [],
+                    used: [], iterations: 0 }
+    for pair in ctx.pairs
+        list.push(st.names, pair.key)
+        list.push(st.values, pair.value)
+    match teraparse.set_get(set, name)
+        None    =>
+            let span = teraerror.TeraSpan { template: name, line: 1, column: 1, offset: 0 }
+            Err(teraerror.TeraError { kind: ErrorTemplateNotFound(name), at: span, chain: [] })
+        Some(t) =>
+            finish(var st, t, only)
+
+fn finish(var st: Env, t: teraparse.TeraTemplate,
+          only: Str) -> Result<Rendered, teraerror.TeraError>
+    let sb = str.builder_new()
+    let done = enter(var st, t, sb, only)
+    let text = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    match done
+        Err(e) =>
+            Err(e)
+        Ok(_)  =>
+            Ok(Rendered { text: text, used: st.used, iterations: st.iterations })
+
+// ── Positions and errors ──────────────────────────────────────────────
+
+fn span_in(t: teraparse.TeraTemplate, at: Int) -> teraerror.TeraSpan
+    teraerror.span_at(teraparse.template_name(t), teraparse.template_source(t), at)
+
+// The frames so far, innermost first.
+fn trail(st: Env) -> [teraerror.TeraFrame]
+    var out: [teraerror.TeraFrame] = []
+    var i = list.len(st.frames) - 1
+    while i >= 0
+        list.push(out, st.frames[i])
+        i = i - 1
+    out
+
+fn fail_in(st: Env, t: teraparse.TeraTemplate, at: Int, kind: TeraErrorKind) -> teraerror.TeraError
+    teraerror.TeraError { kind: kind, at: span_in(t, at), chain: trail(st) }
+
+fn fail(st: Env, at: Int, kind: TeraErrorKind) -> teraerror.TeraError
+    fail_in(st, st.chain[st.cur], at, kind)
+
+// An error a filter or a test built has no position yet.
+fn place(st: Env, at: Int, e: teraerror.TeraError) -> teraerror.TeraError
+    if e.at.template != ""
+        return e
+    fail(st, at, e.kind)
+
+fn refusal(st: Env, at: Int, who: Str, wanted: Str) -> teraerror.TeraError
+    fail(st, at, ErrorFilterRefused(who, wanted))
+
+fn note_used(var st: Env, name: Str)
+    if not list.contains(st.used, name)
+        list.push(st.used, name)
+
+fn push_frame(var st: Env, f: teraerror.TeraFrame) -> Result<Int, teraerror.TeraError>
+    list.push(st.frames, f)
+    if list.len(st.frames) > st.limits.max_depth
+        return Err(fail_in(st, st.chain[st.cur], f.at.offset, ErrorLimit("depth")))
+    Ok(0)
+
+fn emit(st: Env, sb: Int, text: Str, at: Int) -> Result<Int, teraerror.TeraError>
+    str.builder_append(sb, text)
+    if str.builder_len(sb) > st.limits.max_output
+        return Err(fail(st, at, ErrorLimit("output")))
+    Ok(0)
+
+// ── Entering a template ───────────────────────────────────────────────
+
+// Render `t` with the templates it extends, or only the block `only`.
+// Frames, the active names and the chain are put back afterwards.
+fn enter(var st: Env, t: teraparse.TeraTemplate, sb: Int,
+         only: Str) -> Result<Int, teraerror.TeraError>
+    var chain: [teraparse.TeraTemplate] = [t]
+    var child = t
+    while child.program.parent != ""
+        let parent = child.program.parent
+        match teraparse.set_get(st.set, parent)
+            None       =>
+                return Err(fail_in(st, child, child.program.parent_at, ErrorTemplateNotFound(parent)))
+            Some(next) =>
+                if in_chain(chain, parent)
+                    return Err(fail_in(st, child, child.program.parent_at, ErrorCycle(parent)))
+                list.push(chain, next)
+                child = next
+    var saved_chain = st.chain
+    let saved_cur = st.cur
+    let saved_block = st.block
+    let saved_level = st.level
+    let saved_frames = list.len(st.frames)
+    let saved_active = list.len(st.active)
+    st.chain = chain
+    st.cur = list.len(chain) - 1
+    st.block = ""
+    for i in 0..list.len(chain)
+        note_used(var st, teraparse.template_name(chain[i]))
+        list.push(st.active, teraparse.template_name(chain[i]))
+    for i in 0..list.len(chain) - 1
+        push_frame(var st,
+            teraerror.TeraFrame { at: span_in(chain[i], chain[i].program.parent_at), how: FrameExtends })!
+    if only == ""
+        render_nodes(var st, chain[st.cur].program.nodes, sb)!
+    else
+        let j = block_index(st, only)
+        if j < 0
+            return Err(fail(st, 0, ErrorNoSuchField("block " + only)))
+        render_block_body(var st, j, only, sb)!
+    st.chain = saved_chain
+    st.cur = saved_cur
+    st.block = saved_block
+    st.level = saved_level
+    st.frames = list.take(st.frames, saved_frames)
+    st.active = list.take(st.active, saved_active)
+    Ok(0)
+
+fn in_chain(chain: [teraparse.TeraTemplate], name: Str) -> Bool
+    for t in chain
+        if teraparse.template_name(t) == name
+            return true
+    false
+
+// The index in the chain of the template whose definition of the block
+// is used: the first one, which is the most derived.  -1 for none.
+fn block_index(st: Env, name: Str) -> Int
+    block_index_from(st, name, 0)
+
+fn block_index_from(st: Env, name: Str, from: Int) -> Int
+    for i in from..list.len(st.chain)
+        for d in st.chain[i].program.defs
+            if d.name == name
+                return i
+    -1
+
+// A block's body from chain template `j`, with `super()` going on from
+// `j`.
+fn render_block_body(var st: Env, j: Int, name: Str, sb: Int) -> Result<Int, teraerror.TeraError>
+    let saved_cur = st.cur
+    let saved_block = st.block
+    let saved_level = st.level
+    var def = st.chain[j].program.defs[0]
+    for d in st.chain[j].program.defs
+        if d.name == name
+            def = d
+    push_frame(var st, teraerror.TeraFrame { at: span_in(st.chain[j], def.at), how: FrameBlock(name) })!
+    st.cur = j
+    st.block = name
+    st.level = j
+    render_nodes(var st, def.body, sb)!
+    st.cur = saved_cur
+    st.block = saved_block
+    st.level = saved_level
+    st.frames = list.take(st.frames, list.len(st.frames) - 1)
+    Ok(0)
+
+// ── Nodes ─────────────────────────────────────────────────────────────
+
+fn render_nodes(var st: Env, nodes: [teranode.TeraNode],
+                sb: Int) -> Result<Int, teraerror.TeraError>
+    for node in nodes
+        render_node(var st, node, sb)!
+    Ok(0)
+
+fn render_node(var st: Env, node: teranode.TeraNode, sb: Int) -> Result<Int, teraerror.TeraError>
+    match node
+        NodeText(text)                               =>
+            emit(st, sb, text, 0)!
+        NodeOut(expr, at)                            =>
+            let v = eval(var st, expr)!
+            var text = teraval.to_display(v)
+            if st.escape and not is_safe(expr)
+                text = htmlsafe.escape_attr_str(text)
+            emit(st, sb, text, at)!
+        NodeIf(arms, other)                          =>
+            render_if(var st, arms, other, sb)!
+        NodeFor(key, value, source, body, other, at) =>
+            render_for(var st, key, value, source, body, other, at, sb)!
+        NodeSet(name, expr)                          =>
+            let v = eval(var st, expr)!
+            list.push(st.names, name)
+            list.push(st.values, v)
+        NodeInclude(expr, at)                        =>
+            render_include(var st, expr, at, sb)!
+        NodeBlock(name, _, at)                       =>
+            render_block_body(var st, block_index(st, name), name, sb)!
+        NodeFilter(name, args, body, at)             =>
+            render_filter_block(var st, name, args, body, at, sb)!
+        _                                            =>
+            return Ok(0)
+    Ok(0)
+
+// Output that is markup already: a macro's result, a `super()`, or a
+// value that went through `safe` or an escaping filter.
+fn is_safe(e: teranode.TeraExpr) -> Bool
+    match e
+        ExprCall(_, _, _, _, _)      =>
+            true
+        ExprFilter(base, name, _, _) =>
+            name == "safe" or name == "escape" or name == "escape_xml" or is_safe(base)
+        _                            =>
+            false
+
+fn render_if(var st: Env, arms: [teranode.TeraBranch], other: [teranode.TeraNode],
+             sb: Int) -> Result<Int, teraerror.TeraError>
+    for arm in arms
+        if teraval.is_truthy(eval(var st, arm.cond)!)
+            return render_nodes(var st, arm.body, sb)
+    render_nodes(var st, other, sb)
+
+fn pop_to(var st: Env, mark: Int)
+    st.names = list.take(st.names, mark)
+    st.values = list.take(st.values, mark)
+
+fn render_for(var st: Env, key: Str, value: Str, source: teranode.TeraExpr,
+              body: [teranode.TeraNode], other: [teranode.TeraNode], at: Int,
+              sb: Int) -> Result<Int, teraerror.TeraError>
+    let subject = eval(var st, source)!
+    var keys: [teraval.TeraValue] = []
+    var items: [teraval.TeraValue] = []
+    match subject
+        ValueList(xs) =>
+            for i in 0..list.len(xs)
+                list.push(keys, ValueInt(i))
+                list.push(items, xs[i])
+        ValueMap(ps)  =>
+            for p in ps
+                list.push(keys, ValueStr(p.key))
+                list.push(items, p.value)
+        ValueStr(t)   =>
+            for c in str.chars(t)
+                list.push(keys, ValueInt(list.len(items)))
+                list.push(items, ValueStr(c))
+        _             =>
+            return Err(refusal(st, at, "for", "a list, a map or a string, got " + teraval.type_name(subject)))
+    if list.len(items) == 0
+        return render_nodes(var st, other, sb)
+    let mark = list.len(st.names)
+    let n = list.len(items)
+    for i in 0..n
+        st.iterations = st.iterations + 1
+        if st.iterations > st.limits.max_iterations
+            return Err(fail(st, at, ErrorLimit("iterations")))
+        pop_to(var st, mark)
+        if key != ""
+            list.push(st.names, key)
+            list.push(st.values, keys[i])
+            list.push(st.names, value)
+            list.push(st.values, items[i])
+        else if teraval.type_name(subject) == "map"
+            list.push(st.names, value)
+            list.push(st.values, keys[i])
+        else
+            list.push(st.names, value)
+            list.push(st.values, items[i])
+        list.push(st.names, "loop")
+        list.push(st.values, loop_value(i, n))
+        render_nodes(var st, body, sb)!
+    pop_to(var st, mark)
+    Ok(0)
+
+fn loop_value(i: Int, n: Int) -> teraval.TeraValue
+    ValueMap([teraval.TeraPair { key: "index", value: ValueInt(i + 1) },
+              teraval.TeraPair { key: "index0", value: ValueInt(i) },
+              teraval.TeraPair { key: "first", value: ValueBool(i == 0) },
+              teraval.TeraPair { key: "last", value: ValueBool(i == n - 1) },
+              teraval.TeraPair { key: "length", value: ValueInt(n) }])
+
+fn render_include(var st: Env, expr: teranode.TeraExpr, at: Int,
+                  sb: Int) -> Result<Int, teraerror.TeraError>
+    let v = eval(var st, expr)!
+    var name = ""
+    match v
+        ValueStr(t) =>
+            name = t
+        _           =>
+            return Err(refusal(st, at, "include", "a template name, got " + teraval.type_name(v)))
+    if list.contains(st.active, name)
+        return Err(fail(st, at, ErrorCycle(name)))
+    match teraparse.set_get(st.set, name)
+        None    =>
+            return Err(fail(st, at, ErrorTemplateNotFound(name)))
+        Some(t) =>
+            push_frame(var st, teraerror.TeraFrame { at: span_in(st.chain[st.cur], at), how: FrameInclude })!
+            enter(var st, t, sb, "")!
+            st.frames = list.take(st.frames, list.len(st.frames) - 1)
+    Ok(0)
+
+fn render_filter_block(var st: Env, name: Str, args: [teranode.TeraExpr], body: [teranode.TeraNode],
+                       at: Int, sb: Int) -> Result<Int, teraerror.TeraError>
+    let inner = str.builder_new()
+    render_nodes(var st, body, inner)!
+    let text = str.builder_to_str(inner)
+    str.builder_drop(inner)
+    let argv = eval_all(var st, args)!
+    let out = apply_filter(st, name, ValueStr(text), argv, at)!
+    emit(st, sb, teraval.to_display(out), at)!
+    Ok(0)
+
+// ── Expressions ───────────────────────────────────────────────────────
+
+fn eval_all(var st: Env,
+            exprs: [teranode.TeraExpr]) -> Result<[teraval.TeraValue], teraerror.TeraError>
+    var out: [teraval.TeraValue] = []
+    for e in exprs
+        list.push(out, eval(var st, e)!)
+    Ok(out)
+
+fn find_var(st: Env, name: Str) -> ?teraval.TeraValue
+    var i = list.len(st.names) - 1
+    while i >= 0
+        if st.names[i] == name
+            return Some(st.values[i])
+        i = i - 1
+    None
+
+// The value of a path, or `None` when a name or a field on it is not
+// there.  Anything that is not a path is evaluated, and is always there.
+fn eval_opt(var st: Env, e: teranode.TeraExpr) -> Result<?teraval.TeraValue, teraerror.TeraError>
+    match e
+        ExprVar(name, _)         =>
+            Ok(find_var(st, name))
+        ExprField(base, name, _) =>
+            match eval_opt(var st, base)!
+                Some(v) =>
+                    Ok(teraval.step(v, name))
+                None    =>
+                    Ok(None)
+        ExprIndex(base, key, _)  =>
+            match eval_opt(var st, base)!
+                Some(v) =>
+                    match eval_opt(var st, key)!
+                        Some(k) =>
+                            Ok(teraval.step(v, teraval.to_display(k)))
+                        None    =>
+                            Ok(None)
+                None    =>
+                    Ok(None)
+        _                        =>
+            Ok(Some(eval(var st, e)!))
+
+// The path an expression spells, for a message.
+fn path_text(e: teranode.TeraExpr) -> Str
+    match e
+        ExprVar(name, _)         =>
+            name
+        ExprField(base, name, _) =>
+            path_text(base) + "." + name
+        ExprIndex(base, key, _)  =>
+            path_text(base) + bracket(key)
+        _                        =>
+            "(value)"
+
+// A subscript as it reads in a path: a literal key as a field, any
+// other as the expression in brackets.
+fn bracket(key: teranode.TeraExpr) -> Str
+    match key
+        ExprLit(v) =>
+            "." + teraval.to_display(v)
+        _          =>
+            "[" + path_text(key) + "]"
+
+fn eval(var st: Env, e: teranode.TeraExpr) -> Result<teraval.TeraValue, teraerror.TeraError>
+    match e
+        ExprLit(v)                                 =>
+            Ok(v)
+        ExprList(items)                            =>
+            Ok(ValueList(eval_all(var st, items)!))
+        ExprNot(x)                                 =>
+            Ok(ValueBool(not teraval.is_truthy(eval(var st, x)!)))
+        ExprBin(op, l, r, at)                      =>
+            eval_binary(var st, op, l, r, at)
+        ExprFilter(base, name, args, at)           =>
+            eval_filter(var st, base, name, args, at)
+        ExprTest(subject, name, args, negated, at) =>
+            eval_test(var st, subject, name, args, negated, at)
+        ExprCall(ns, name, args, names, at)        =>
+            eval_call(var st, ns, name, args, names, at)
+        ExprVar(name, at)                          =>
+            match find_var(st, name)
+                Some(v) =>
+                    Ok(v)
+                None    =>
+                    Err(fail(st, at, ErrorUnknownVariable(name)))
+        ExprField(base, name, at)                  =>
+            match teraval.step(eval(var st, base)!, name)
+                Some(v) =>
+                    Ok(v)
+                None    =>
+                    Err(fail(st, at, ErrorNoSuchField(path_text(e))))
+        ExprIndex(base, key, at)                   =>
+            let name = teraval.to_display(eval(var st, key)!)
+            match teraval.step(eval(var st, base)!, name)
+                Some(v) =>
+                    Ok(v)
+                None    =>
+                    Err(fail(st, at, ErrorNoSuchField(path_text(base) + "." + name)))
+
+fn eval_binary(var st: Env, op: Str, l: teranode.TeraExpr, r: teranode.TeraExpr,
+               at: Int) -> Result<teraval.TeraValue, teraerror.TeraError>
+    if op == "and"
+        return Ok(ValueBool(teraval.is_truthy(eval(var st, l)!) and teraval.is_truthy(eval(var st, r)!)))
+    if op == "or"
+        return Ok(ValueBool(teraval.is_truthy(eval(var st, l)!) or teraval.is_truthy(eval(var st, r)!)))
+    let a = eval(var st, l)!
+    let b = eval(var st, r)!
+    if op == "=="
+        return Ok(ValueBool(teraval.equals(a, b)))
+    if op == "!="
+        return Ok(ValueBool(not teraval.equals(a, b)))
+    if op == "in"
+        return contains_value(st, b, a, at)
+    match teraval.compare(a, b)
+        None    =>
+            Err(refusal(st,
+                at,
+                op,
+                "two numbers or two strings, got " + teraval.type_name(a) + " and " + teraval.type_name(b)))
+        Some(c) =>
+            if op == "<"
+                return Ok(ValueBool(c < 0))
+            if op == "<="
+                return Ok(ValueBool(c <= 0))
+            if op == ">"
+                return Ok(ValueBool(c > 0))
+            Ok(ValueBool(c >= 0))
+
+// `needle in haystack`: an item of a list, a substring of a string, a
+// key of a map.
+fn contains_value(st: Env, haystack: teraval.TeraValue, needle: teraval.TeraValue,
+                  at: Int) -> Result<teraval.TeraValue, teraerror.TeraError>
+    match haystack
+        ValueList(xs) =>
+            for x in xs
+                if teraval.equals(x, needle)
+                    return Ok(ValueBool(true))
+            Ok(ValueBool(false))
+        ValueStr(t)   =>
+            Ok(ValueBool(str.contains(t, teraval.to_display(needle))))
+        ValueMap(_)   =>
+            Ok(ValueBool(teraval.step(haystack, teraval.to_display(needle)) != None))
+        _             =>
+            Err(refusal(st, at, "in", "a list, a string or a map, got " + teraval.type_name(haystack)))
+
+fn apply_filter(st: Env, name: Str, v: teraval.TeraValue, args: [teraval.TeraValue],
+                at: Int) -> Result<teraval.TeraValue, teraerror.TeraError>
+    match terafilter.get(st.filters, name)
+        None    =>
+            let hint = teraerror.nearest(name, terafilter.filter_names(st.filters))
+            Err(fail(st, at, ErrorUnknownFilter(name, hint)))
+        Some(f) =>
+            match f.apply(v, args)
+                Ok(out)  =>
+                    Ok(out)
+                Err(err) =>
+                    Err(place(st, at, err))
+
+fn eval_filter(var st: Env, base: teranode.TeraExpr, name: Str, args: [teranode.TeraExpr],
+               at: Int) -> Result<teraval.TeraValue, teraerror.TeraError>
+    var subject = ValueNull
+    if name == "default"
+        subject = eval_opt(var st, base)! ?? ValueNull
+    else
+        subject = eval(var st, base)!
+    let argv = eval_all(var st, args)!
+    apply_filter(st, name, subject, argv, at)
+
+fn eval_test(var st: Env, subject: teranode.TeraExpr, name: Str, args: [teranode.TeraExpr],
+             negated: Bool, at: Int) -> Result<teraval.TeraValue, teraerror.TeraError>
+    let argv = eval_all(var st, args)!
+    var found = false
+    for n in terafilter.test_names(st.tests)
+        if n == name
+            found = true
+    if not found
+        let hint = teraerror.nearest(name, terafilter.test_names(st.tests))
+        return Err(fail(st, at, ErrorUnknownFilter(name, hint)))
+    var answer = false
+    let value = eval_opt(var st, subject)!
+    match value
+        Some(v) =>
+            answer = run_test(st, name, v, argv, at)!
+        None    =>
+            if name == "defined" or name == "undefined"
+                answer = name == "undefined"
+            else
+                answer = run_test(st, name, eval(var st, subject)!, argv, at)!
+    Ok(ValueBool(answer != negated))
+
+fn run_test(st: Env, name: Str, v: teraval.TeraValue, args: [teraval.TeraValue],
+            at: Int) -> Result<Bool, teraerror.TeraError>
+    let t = find_test(st.tests, name)
+    match t.check(v, args)
+        Ok(b)    =>
+            Ok(b)
+        Err(err) =>
+            Err(place(st, at, err))
+
+// The registered test of this name.  The caller has checked that there is one.
+fn find_test(ts: terafilter.TeraTests, name: Str) -> terafilter.TeraTest
+    var found = ts.tests[0]
+    for t in ts.tests
+        if t.name == name
+            found = t
+    found
+
+// ── Macros and super ──────────────────────────────────────────────────
+
+struct MacroRef
+    owner: teraparse.TeraTemplate
+    params: [teranode.TeraParam]
+    body: [teranode.TeraNode]
+
+fn find_macro(var st: Env, ns: Str, name: Str, at: Int) -> Result<MacroRef, teraerror.TeraError>
+    var owner = st.chain[st.cur]
+    if ns != "" and ns != "self"
+        var file = ""
+        for node in owner.program.nodes
+            let target = import_target(node, ns)
+            if target != ""
+                file = target
+        if file == ""
+            return Err(fail(st, at, ErrorUnknownVariable(ns)))
+        match teraparse.set_get(st.set, file)
+            None    =>
+                return Err(fail(st, at, ErrorTemplateNotFound(file)))
+            Some(t) =>
+                owner = t
+                note_used(var st, file)
+    for node in owner.program.nodes
+        match macro_of(node, owner, name)
+            Some(found) =>
+                return Ok(found)
+            None        =>
+                continue
+    Err(fail(st, at, ErrorNoSuchField(name)))
+
+// The file an `import` node reads when it binds `ns`, or empty.
+fn import_target(node: teranode.TeraNode, ns: Str) -> Str
+    match node
+        NodeImport(file, space) =>
+            if space == ns
+                return file
+            ""
+        _                       =>
+            ""
+
+fn macro_of(node: teranode.TeraNode, owner: teraparse.TeraTemplate, name: Str) -> ?MacroRef
+    match node
+        NodeMacro(m, params, body) =>
+            if m == name
+                return Some(MacroRef { owner: owner, params: params, body: body })
+            None
+        _                          =>
+            None
+
+fn eval_call(var st: Env, ns: Str, name: Str, args: [teranode.TeraExpr], names: [Str],
+             at: Int) -> Result<teraval.TeraValue, teraerror.TeraError>
+    if ns == "" and name == "super"
+        return call_super(var st, at)
+    let m = find_macro(var st, ns, name, at)!
+    let argv = eval_all(var st, args)!
+    if list.len(argv) > list.len(m.params)
+        return Err(refusal(st,
+            at,
+            name,
+            str.from_int(list.len(m.params)) + " arguments at most, got " + str.from_int(list.len(argv))))
+    for kw in names
+        if kw != "" and not has_param(m.params, kw)
+            return Err(refusal(st, at, name, "no argument named `" + kw + "`"))
+    let call_site = span_in(st.chain[st.cur], at)
+    var saved_names = st.names
+    var saved_values = st.values
+    var saved_chain = st.chain
+    let saved_cur = st.cur
+    let saved_block = st.block
+    let saved_frames = list.len(st.frames)
+    push_frame(var st, teraerror.TeraFrame { at: call_site, how: FrameMacro(name) })!
+    st.names = []
+    st.values = []
+    st.chain = [m.owner]
+    st.cur = 0
+    st.block = ""
+    for i in 0..list.len(m.params)
+        let param = m.params[i]
+        var v = ValueNull
+        let pos = keyword_index(names, param.name)
+        if pos >= 0
+            v = argv[pos]
+        else if i < list.len(argv) and names[i] == ""
+            v = argv[i]
+        else if param.has_default
+            v = eval(var st, param.default)!
+        else
+            return Err(fail(st, at, ErrorUnknownVariable(param.name)))
+        list.push(st.names, param.name)
+        list.push(st.values, v)
+    let inner = str.builder_new()
+    render_nodes(var st, m.body, inner)!
+    let text = str.builder_to_str(inner)
+    str.builder_drop(inner)
+    st.names = saved_names
+    st.values = saved_values
+    st.chain = saved_chain
+    st.cur = saved_cur
+    st.block = saved_block
+    st.frames = list.take(st.frames, saved_frames)
+    Ok(ValueStr(text))
+
+fn has_param(params: [teranode.TeraParam], name: Str) -> Bool
+    for p in params
+        if p.name == name
+            return true
+    false
+
+fn keyword_index(names: [Str], name: Str) -> Int
+    for i in 0..list.len(names)
+        if names[i] == name
+            return i
+    -1
+
+// The parent's version of the block being rendered.
+fn call_super(var st: Env, at: Int) -> Result<teraval.TeraValue, teraerror.TeraError>
+    if st.block == ""
+        return Err(fail(st, at, ErrorNoSuchField("super()")))
+    let j = block_index_from(st, st.block, st.level + 1)
+    if j < 0
+        return Err(fail(st, at, ErrorNoSuchField("super()")))
+    let inner = str.builder_new()
+    render_block_body(var st, j, st.block, inner)!
+    let text = str.builder_to_str(inner)
+    str.builder_drop(inner)
+    Ok(ValueStr(text))
